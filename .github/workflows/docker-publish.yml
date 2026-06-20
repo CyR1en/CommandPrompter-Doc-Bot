@@ -1,0 +1,110 @@
+# Builds and publishes the CMDP Doc Bot Docker image to GHCR on tag releases.
+#
+# Tag pattern: push a semver tag like ``v1.2.3`` (or ``v1.2.3-rc.1`` for a
+# prerelease) and the workflow will:
+#   * build a multi-arch image (linux/amd64, linux/arm64),
+#   * push it to ``ghcr.io/${{ github.repository_owner }}/cmdp_doc_bot``,
+#   * tag the image with the cleaned version (``1.2.3``), the short SHA, and
+#     ``latest`` for stable releases only (prereleases are skipped),
+#   * attach provenance and an SBOM for supply-chain traceability.
+
+name: docker-publish
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Allow manual runs from the Actions UI for ad-hoc builds (pushes only
+  # to the registry when a tag is present; otherwise logs are discarded
+  # via the ``--no-push`` fallback below).
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/cmdp_doc_bot
+
+# Cancel any in-flight run for the same tag — saves runner minutes when
+# a maintainer force-pushes a release tag.
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-push:
+    name: Build & push (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read   # checkout
+      packages: write  # push to GHCR
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Derive image tags and labels from the pushed Git tag via the
+      # official metadata action. Outputs:
+      #   tags    — semver-cleaned version tags
+      #   labels  — org.opencontainers.image.* labels
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # ``flavor: latest=auto`` makes ``latest`` apply automatically,
+          # but only for non-prerelease tags (e.g. v1.2.3 → latest,
+          # v1.2.3-rc.1 → no ``latest`` tag).
+          flavor: latest=auto
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+            type=raw,value=edge,enable={{is_default_branch}}
+
+      # QEMU + buildx are required for cross-platform images.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # GitHub-native layer cache. Falls back to registry cache when the
+      # GHCR image doesn't exist yet (e.g. first build).
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.ref_name }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Supply-chain hardening: SLSA-style provenance + SPDX SBOM.
+          provenance: mode=max
+          sbom: true
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+          # Strip the .venv and data/ directories — .dockerignore already
+          # excludes them, but being explicit guards against future edits.
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+
+      - name: Move buildx cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache

@@ -1,0 +1,16 @@
+# CMDP Doc Bot — container orchestration
+#
+# Builds and runs the bot from the local Dockerfile, mounts ./data so the
+# cloned repositories and the compiled full-context documentation persist
+# across restarts, and feeds configuration in from a .env file.
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
