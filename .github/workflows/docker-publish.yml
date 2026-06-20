@@ -1,12 +1,17 @@
-# Builds and publishes the CMDP Doc Bot Docker image to GHCR on tag releases.
+# Builds and publishes the CMDP Doc Bot Docker image to GHCR.
 #
-# Tag pattern: push a semver tag like ``v1.2.3`` (or ``v1.2.3-rc.1`` for a
-# prerelease) and the workflow will:
-#   * build a multi-arch image (linux/amd64, linux/arm64),
-#   * push it to ``ghcr.io/${{ github.repository_owner }}/cmdp_doc_bot``,
-#   * tag the image with the cleaned version (``1.2.3``), the short SHA, and
-#     ``latest`` for stable releases only (prereleases are skipped),
-#   * attach provenance and an SBOM for supply-chain traceability.
+# Two trigger paths, both push to GHCR:
+#   1. Push a semver tag like ``v1.2.3`` (or ``v1.2.3-rc.1`` for a
+#      prerelease). The image is tagged with the cleaned version
+#      (``1.2.3``), the major.minor (``1.2``), the short SHA, and
+#      ``latest`` for stable releases only (prereleases are skipped).
+#   2. Run the workflow manually from the Actions tab. Optionally supply
+#      a ``version`` input (e.g. ``1.2.0``) to publish a named version;
+#      leave it blank to publish only the short SHA (and ``edge`` when
+#      run from the default branch).
+#
+# All builds are multi-arch (linux/amd64, linux/arm64) and ship with
+# provenance + SPDX SBOM.
 
 name: docker-publish
 
@@ -14,10 +19,13 @@ on:
   push:
     tags:
       - "v*"
-  # Allow manual runs from the Actions UI for ad-hoc builds (pushes only
-  # to the registry when a tag is present; otherwise logs are discarded
-  # via the ``--no-push`` fallback below).
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Optional version tag (e.g. 1.2.0). Leave blank for a SHA-only build."
+        required: false
+        type: string
+        default: ""
 
 env:
   REGISTRY: ghcr.io
@@ -55,6 +63,8 @@ jobs:
           # v1.2.3-rc.1 → no ``latest`` tag).
           flavor: latest=auto
           tags: |
+            # Manual release with an explicit version wins over auto-derived tags.
+            type=raw,value=${{ inputs.version }},enable=${{ inputs.version != '' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,format=short
@@ -78,7 +88,7 @@ jobs:
             ${{ runner.os }}-buildx-
 
       - name: Log in to GHCR
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -91,7 +101,7 @@ jobs:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name == 'push' }}
+          push: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Supply-chain hardening: SLSA-style provenance + SPDX SBOM.
