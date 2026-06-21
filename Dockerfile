@@ -1,10 +1,11 @@
 # CMDP Doc Bot — container image
 #
-# Python image that runs the Discord documentation bot. The bot spawns an
-# ``opencode`` subprocess for each question, so the image needs the
-# ``opencode`` CLI (installed via its official one-line installer) in
-# addition to ``git`` (for GitPython-driven repository syncing) and the
-# Python dependencies.
+# Python image that runs the Discord documentation bot. The bot starts
+# a single long-lived ``opencode serve`` subprocess at boot and talks
+# to its HTTP API for per-user session management, so the image needs
+# the ``opencode`` CLI (installed via its official one-line installer)
+# in addition to ``git`` (for GitPython-driven repository syncing) and
+# the Python dependencies.
 
 FROM python:3.11-slim
 

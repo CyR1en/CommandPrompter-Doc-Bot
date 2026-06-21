@@ -3,10 +3,11 @@
 The Discord :class:`~discord.Message`, :class:`~discord.User`, and
 :class:`~discord.TextChannel` interfaces are replaced with lightweight
 fakes so the tests exercise :class:`DocBot.on_message` without a Discord
-gateway connection. The :class:`~core.rate_limiter.RateLimiter` and
-:class:`~core.llm_client.LLMClient` are mocked so the rate-limiting,
-mention-checking, and LLM-invocation branches can be asserted
-independently.
+gateway connection. The :class:`~core.rate_limiter.RateLimiter`,
+:class:`~core.llm_client.LLMClient`, and
+:class:`~core.session_manager.SessionManager` are mocked so the
+rate-limiting, mention-checking, session-lookup, and LLM-invocation
+branches can be asserted independently.
 
 The :class:`DocBot` is constructed normally (its constructor does not
 connect to Discord) and ``self.user`` is populated through the
@@ -16,6 +17,7 @@ property returns.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -147,17 +149,40 @@ def llm_client() -> MagicMock:
 
     Returns:
         A :class:`MagicMock` whose ``get_answer`` is an
-        :class:`AsyncMock` returning ``"answer-text"``.
+        :class:`AsyncMock` returning ``"answer-text"`` and whose
+        ``agent`` attribute is ``"docbot"``.
     """
     client = MagicMock(name="llm_client")
     client.get_answer = AsyncMock(return_value="answer-text")
+    client.agent = "docbot"
     return client
+
+
+@pytest.fixture()
+def session_manager() -> MagicMock:
+    """Return a mocked :class:`SessionManager`.
+
+    Returns:
+        A :class:`MagicMock` whose ``get_or_create`` is an
+        :class:`AsyncMock` returning ``"ses_test"`` and whose
+        ``lock_for`` returns a real, unlocked :class:`asyncio.Lock`.
+        ``touch`` is a plain :class:`MagicMock`` (sync, no-op).
+    """
+    sm = MagicMock(name="session_manager")
+    sm.get_or_create = AsyncMock(return_value="ses_test")
+    # ``lock_for`` must return a real asyncio.Lock so ``async with`` works.
+    sm.lock_for = MagicMock(return_value=asyncio.Lock())
+    sm.touch = MagicMock(return_value=None)
+    sm.remove = MagicMock(return_value=None)
+    sm.cleanup_expired = MagicMock(return_value=[])
+    return sm
 
 
 @pytest.fixture()
 def bot(
     rate_limiter: MagicMock,
     llm_client: MagicMock,
+    session_manager: MagicMock,
 ) -> DocBot:
     """Return a :class:`DocBot` with mocked deps and a populated user.
 
@@ -168,28 +193,38 @@ def bot(
     Args:
         rate_limiter: The mocked rate limiter fixture.
         llm_client: The mocked LLM client fixture.
+        session_manager: The mocked session manager fixture.
 
     Returns:
         A :class:`DocBot` whose ``self.user.id`` is :data:`_BOT_USER_ID`.
     """
-    client = DocBot(rate_limiter, llm_client)
+    client = DocBot(
+        rate_limiter,
+        llm_client,
+        session_manager,
+        provider_id="opencode",
+        model_id="deepseek-v4-flash-free",
+        variant="max",
+    )
     client._connection.user = _make_bot_user()  # type: ignore[attr-defined]
     return client
 
 
 @pytest.mark.asyncio
 async def test_ignores_messages_from_bots(
-    bot: DocBot, rate_limiter: MagicMock, llm_client: MagicMock
+    bot: DocBot, rate_limiter: MagicMock, llm_client: MagicMock,
+    session_manager: MagicMock,
 ) -> None:
     """Messages authored by bots are dropped before any logic runs.
 
-    The rate limiter and LLM client must not be consulted, and no reply is
-    sent.
+    The rate limiter, session manager, and LLM client must not be
+    consulted, and no reply is sent.
     """
     message, channel, tracker = _make_message(author_bot=True)
     await bot.on_message(message)
 
     rate_limiter.is_allowed.assert_not_called()
+    session_manager.get_or_create.assert_not_called()
     llm_client.get_answer.assert_not_called()
     message.reply.assert_not_called()
     assert tracker.entered == 0
@@ -197,7 +232,8 @@ async def test_ignores_messages_from_bots(
 
 @pytest.mark.asyncio
 async def test_ignores_messages_without_mention(
-    bot: DocBot, rate_limiter: MagicMock, llm_client: MagicMock
+    bot: DocBot, rate_limiter: MagicMock, llm_client: MagicMock,
+    session_manager: MagicMock,
 ) -> None:
     """Messages that do not @mention the bot are ignored.
 
@@ -211,6 +247,7 @@ async def test_ignores_messages_without_mention(
     await bot.on_message(message)
 
     rate_limiter.is_allowed.assert_not_called()
+    session_manager.get_or_create.assert_not_called()
     llm_client.get_answer.assert_not_called()
     message.reply.assert_not_called()
     assert tracker.entered == 0
@@ -218,13 +255,14 @@ async def test_ignores_messages_without_mention(
 
 @pytest.mark.asyncio
 async def test_ignores_message_when_bot_user_unknown(
-    rate_limiter: MagicMock, llm_client: MagicMock
+    rate_limiter: MagicMock, llm_client: MagicMock,
+    session_manager: MagicMock,
 ) -> None:
     """When ``self.user`` is ``None`` mentions are never matched.
 
     Guards the early return so a pre-``on_ready`` message cannot raise.
     """
-    client = DocBot(rate_limiter, llm_client)
+    client = DocBot(rate_limiter, llm_client, session_manager)
     # ``self.user`` stays None (no _connection.user set).
     message, channel, tracker = _make_message(
         mentions=[MagicMock()], content="hi"
@@ -232,12 +270,14 @@ async def test_ignores_message_when_bot_user_unknown(
     await client.on_message(message)
 
     rate_limiter.is_allowed.assert_not_called()
+    session_manager.get_or_create.assert_not_called()
     message.reply.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_rate_limited_sends_rejection_and_skips_llm(
-    bot: DocBot, rate_limiter: MagicMock, llm_client: MagicMock
+    bot: DocBot, rate_limiter: MagicMock, llm_client: MagicMock,
+    session_manager: MagicMock,
 ) -> None:
     """An over-quota user gets a polite retry message and no LLM call.
 
@@ -256,6 +296,7 @@ async def test_rate_limited_sends_rejection_and_skips_llm(
 
     rate_limiter.is_allowed.assert_called_once_with(42)
     rate_limiter.get_retry_after.assert_called_once_with(42)
+    session_manager.get_or_create.assert_not_called()
     llm_client.get_answer.assert_not_called()
     assert tracker.entered == 0
     message.reply.assert_awaited_once()
@@ -266,13 +307,14 @@ async def test_rate_limited_sends_rejection_and_skips_llm(
 
 @pytest.mark.asyncio
 async def test_answers_mention_query(
-    bot: DocBot, llm_client: MagicMock
+    bot: DocBot, llm_client: MagicMock, session_manager: MagicMock
 ) -> None:
     """A clean mention is answered via the LLM client and sent back.
 
     The mention token is stripped before the query is passed to the
-    client, a typing indicator is shown, and the client's answer is sent
-    back as a reply to the message.
+    client, a typing indicator is shown, the session is looked up, the
+    per-user lock is acquired, and the client's answer is sent back as a
+    reply to the message.
     """
     llm_client.get_answer.return_value = "Use /setspawn to set the spawn."
 
@@ -284,17 +326,34 @@ async def test_answers_mention_query(
     )
     await bot.on_message(message)
 
-    llm_client.get_answer.assert_awaited_once_with(
-        "how do I set the spawn point?",
-    )
+    # Session was looked up.
+    session_manager.get_or_create.assert_awaited_once()
+    goc_kwargs = session_manager.get_or_create.await_args.kwargs
+    assert goc_kwargs["title"] == "discord:42"
+    assert goc_kwargs["agent"] == "docbot"
+    assert goc_kwargs["provider_id"] == "opencode"
+    assert goc_kwargs["model_id"] == "deepseek-v4-flash-free"
+    # LLM was prompted with the session id and the stripped query.
+    llm_client.get_answer.assert_awaited_once()
+    ga_kwargs = llm_client.get_answer.await_args.kwargs
+    assert ga_kwargs["session_id"] == "ses_test"
+    assert ga_kwargs["provider_id"] == "opencode"
+    assert ga_kwargs["model_id"] == "deepseek-v4-flash-free"
+    assert ga_kwargs["variant"] == "max"
+    # The query is the first positional arg, stripped of the mention.
+    query_arg: str = llm_client.get_answer.await_args.args[0]
+    assert query_arg == "how do I set the spawn point?"
+    # Reply sent.
     message.reply.assert_awaited_once_with("Use /setspawn to set the spawn.")
     assert tracker.entered == 1
     assert tracker.exited == 1
+    # Session was touched on success.
+    session_manager.touch.assert_called_once_with(42)
 
 
 @pytest.mark.asyncio
 async def test_extract_query_strips_nickname_mention_form(
-    bot: DocBot, llm_client: MagicMock
+    bot: DocBot, llm_client: MagicMock, session_manager: MagicMock
 ) -> None:
     """The ``<@!id>`` nickname-mention form is also stripped.
 
@@ -309,19 +368,20 @@ async def test_extract_query_strips_nickname_mention_form(
     )
     await bot.on_message(message)
 
-    llm_client.get_answer.assert_awaited_once_with(
-        "what is the max stack size?",
-    )
+    query_arg: str = llm_client.get_answer.await_args.args[0]
+    assert query_arg == "what is the max stack size?"
 
 
 @pytest.mark.asyncio
 async def test_empty_query_after_strip_is_ignored(
-    bot: DocBot, rate_limiter: MagicMock, llm_client: MagicMock
+    bot: DocBot, rate_limiter: MagicMock, llm_client: MagicMock,
+    session_manager: MagicMock,
 ) -> None:
     """A mention with no accompanying text is silently dropped.
 
-    The rate limiter has already recorded the attempt, but the LLM client
-    is not invoked for an empty query and nothing is sent.
+    The rate limiter has already recorded the attempt, but the session
+    manager and LLM client are not invoked for an empty query and
+    nothing is sent.
     """
     bot_user = bot.user
     assert bot_user is not None
@@ -331,9 +391,70 @@ async def test_empty_query_after_strip_is_ignored(
     await bot.on_message(message)
 
     rate_limiter.is_allowed.assert_called_once()
+    session_manager.get_or_create.assert_not_called()
     llm_client.get_answer.assert_not_called()
     message.reply.assert_not_called()
     assert tracker.entered == 0
+
+
+@pytest.mark.asyncio
+async def test_sends_fallback_when_llm_returns_none(
+    bot: DocBot, llm_client: MagicMock, session_manager: MagicMock
+) -> None:
+    """When ``get_answer`` returns ``None`` (HTTP failed) a fallback
+    message is sent instead of an empty reply.
+
+    Without this guard, ``message.reply("")`` would crash with
+    ``discord.errors.HTTPException: 400 Bad Request: Cannot send an
+    empty message`` and the user would see no response at all.
+    """
+    llm_client.get_answer.return_value = None
+
+    bot_user = bot.user
+    assert bot_user is not None
+    message, channel, tracker = _make_message(
+        mentions=[bot_user],
+        content=f"<@{_BOT_USER_ID}> what is bigger, 9.8 or 9.11?",
+    )
+    await bot.on_message(message)
+
+    llm_client.get_answer.assert_awaited_once()
+    message.reply.assert_awaited_once()
+    sent_text: str = message.reply.await_args.args[0]
+    assert sent_text  # non-empty
+    assert "couldn't generate" in sent_text.lower()
+    # Session is NOT touched on failure.
+    session_manager.touch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sends_fallback_when_llm_returns_empty_string(
+    bot: DocBot, llm_client: MagicMock, session_manager: MagicMock
+) -> None:
+    """When ``get_answer`` returns ``""`` (agent was silent) the bot
+    also sends a fallback message.
+
+    An empty-string answer is not a useful reply to the user; the
+    fallback is the same polite "try again or rephrase" prompt used for
+    HTTP failures.
+    """
+    llm_client.get_answer.return_value = ""
+
+    bot_user = bot.user
+    assert bot_user is not None
+    message, channel, tracker = _make_message(
+        mentions=[bot_user],
+        content=f"<@{_BOT_USER_ID}> something off-topic",
+    )
+    await bot.on_message(message)
+
+    llm_client.get_answer.assert_awaited_once()
+    message.reply.assert_awaited_once()
+    sent_text: str = message.reply.await_args.args[0]
+    assert sent_text
+    assert "couldn't generate" in sent_text.lower()
+    # Session is NOT touched when the answer is empty.
+    session_manager.touch.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -354,12 +475,13 @@ async def test_on_ready_logs_when_user_available(
 @pytest.mark.asyncio
 async def test_on_ready_tolerates_missing_user(
     rate_limiter: MagicMock, llm_client: MagicMock,
+    session_manager: MagicMock,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """``on_ready`` does not raise when ``self.user`` is ``None``."""
     import logging
 
-    client = DocBot(rate_limiter, llm_client)
+    client = DocBot(rate_limiter, llm_client, session_manager)
     caplog.set_level(logging.INFO, logger="bot.client")
     # Should not raise.
     await client.on_ready()
@@ -370,26 +492,36 @@ async def test_on_ready_tolerates_missing_user(
 
 
 def test_constructor_stores_dependencies(
-    rate_limiter: MagicMock, llm_client: MagicMock
+    rate_limiter: MagicMock, llm_client: MagicMock,
+    session_manager: MagicMock,
 ) -> None:
-    """The rate limiter and LLM client are stored as attributes."""
-    client = DocBot(rate_limiter, llm_client)
+    """The rate limiter, LLM client, and session manager are stored."""
+    client = DocBot(
+        rate_limiter, llm_client, session_manager,
+        provider_id="opencode", model_id="m", variant="max",
+    )
 
     assert client.rate_limiter is rate_limiter
     assert client.llm_client is llm_client
+    assert client.session_manager is session_manager
+    assert client.provider_id == "opencode"
+    assert client.model_id == "m"
+    assert client.variant == "max"
 
 
 def test_constructor_enables_message_content_intent(
-    rate_limiter: MagicMock, llm_client: MagicMock
+    rate_limiter: MagicMock, llm_client: MagicMock,
+    session_manager: MagicMock,
 ) -> None:
     """The default intents enable ``message_content`` for reading content."""
-    client = DocBot(rate_limiter, llm_client)
+    client = DocBot(rate_limiter, llm_client, session_manager)
 
     assert client.intents.message_content is True
 
 
 def test_constructor_accepts_custom_intents(
-    rate_limiter: MagicMock, llm_client: MagicMock
+    rate_limiter: MagicMock, llm_client: MagicMock,
+    session_manager: MagicMock,
 ) -> None:
     """Explicitly passed intents are forwarded to the base client.
 
@@ -404,7 +536,9 @@ def test_constructor_accepts_custom_intents(
     custom.message_content = True
     custom.guild_messages = False  # differs from Intents.default()
 
-    client = DocBot(rate_limiter, llm_client, intents=custom)
+    client = DocBot(
+        rate_limiter, llm_client, session_manager, intents=custom
+    )
 
     assert client.intents == custom
     assert client.intents.value == custom.value
@@ -414,7 +548,7 @@ def test_constructor_accepts_custom_intents(
 
 @pytest.mark.asyncio
 async def test_answers_role_mention_query(
-    bot: DocBot, llm_client: MagicMock
+    bot: DocBot, llm_client: MagicMock, session_manager: MagicMock
 ) -> None:
     """A query mentioning a role assigned to the bot is answered and sent back."""
     llm_client.get_answer.return_value = "Use /setspawn to set the spawn."
@@ -439,9 +573,8 @@ async def test_answers_role_mention_query(
 
     await bot.on_message(message)
 
-    llm_client.get_answer.assert_awaited_once_with(
-        "how do I set the spawn point?",
-    )
+    query_arg: str = llm_client.get_answer.await_args.args[0]
+    assert query_arg == "how do I set the spawn point?"
     message.reply.assert_awaited_once_with("Use /setspawn to set the spawn.")
     assert tracker.entered == 1
     assert tracker.exited == 1
@@ -470,3 +603,187 @@ def test_extract_query_strips_role_mentions(bot: DocBot) -> None:
     # Call _extract_query directly
     query = bot._extract_query(message)
     assert query == "hello world <@&333>"
+
+
+# ---------------------------------------------------------------------------
+# Per-user session flow
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_creates_session_for_new_user(
+    bot: DocBot, llm_client: MagicMock, session_manager: MagicMock
+) -> None:
+    """``session_manager.get_or_create`` is called with the right args."""
+    bot_user = bot.user
+    assert bot_user is not None
+    message, _, _ = _make_message(
+        mentions=[bot_user], content=f"<@{_BOT_USER_ID}> hi"
+    )
+    await bot.on_message(message)
+
+    session_manager.get_or_create.assert_awaited_once()
+    args = session_manager.get_or_create.await_args.args
+    kwargs = session_manager.get_or_create.await_args.kwargs
+    # First positional arg is the user id.
+    assert args[0] == 42
+    assert kwargs["title"] == "discord:42"
+    assert kwargs["agent"] == "docbot"
+
+
+@pytest.mark.asyncio
+async def test_reuses_session_within_ttl(
+    bot: DocBot, llm_client: MagicMock, session_manager: MagicMock
+) -> None:
+    """A second message from the same user reuses the session.
+
+    The ``get_or_create`` mock returns the same ``"ses_test"`` each
+    time; the test asserts it is called twice (once per message) and
+    the LLM client is prompted with the same session id both times.
+    """
+    bot_user = bot.user
+    assert bot_user is not None
+    msg1, _, _ = _make_message(
+        mentions=[bot_user], content=f"<@{_BOT_USER_ID}> q1"
+    )
+    msg2, _, _ = _make_message(
+        mentions=[bot_user], content=f"<@{_BOT_USER_ID}> q2"
+    )
+    await bot.on_message(msg1)
+    await bot.on_message(msg2)
+
+    assert session_manager.get_or_create.await_count == 2
+    # Both prompts use the same session id.
+    sid1 = llm_client.get_answer.await_args_list[0].kwargs["session_id"]
+    sid2 = llm_client.get_answer.await_args_list[1].kwargs["session_id"]
+    assert sid1 == sid2 == "ses_test"
+
+
+@pytest.mark.asyncio
+async def test_creates_new_session_after_ttl_expires(
+    bot: DocBot, llm_client: MagicMock, session_manager: MagicMock
+) -> None:
+    """After the sweeper runs, a new message gets a new session.
+
+    Simulates the sweeper by making ``get_or_create`` return a different
+    session id on the second call (the real :class:`SessionManager`
+    would do this after the TTL expired and the sweeper removed the
+    entry).
+    """
+    bot_user = bot.user
+    assert bot_user is not None
+    msg1, _, _ = _make_message(
+        mentions=[bot_user], content=f"<@{_BOT_USER_ID}> q1"
+    )
+    msg2, _, _ = _make_message(
+        mentions=[bot_user], content=f"<@{_BOT_USER_ID}> q2"
+    )
+
+    session_manager.get_or_create = AsyncMock(
+        side_effect=["ses_old", "ses_new"]
+    )
+    await bot.on_message(msg1)
+    await bot.on_message(msg2)
+
+    sid1 = llm_client.get_answer.await_args_list[0].kwargs["session_id"]
+    sid2 = llm_client.get_answer.await_args_list[1].kwargs["session_id"]
+    assert sid1 == "ses_old"
+    assert sid2 == "ses_new"
+
+
+@pytest.mark.asyncio
+async def test_acquires_per_user_lock(
+    bot: DocBot, llm_client: MagicMock, session_manager: MagicMock
+) -> None:
+    """The per-user lock is acquired BEFORE ``get_or_create`` and held
+    through ``get_answer``.
+
+    Regression guard for the C3 race: ``get_or_create`` must be inside
+    the lock's ``async with`` block, otherwise two concurrent @mentions
+    for the same new user would both pass the existence check and each
+    create a separate session on the server (orphaning one). Verified
+    by recording the order of ``session_manager`` calls and asserting
+    ``lock_for`` precedes ``get_or_create``.
+    """
+    lock = asyncio.Lock()
+    session_manager.lock_for = MagicMock(return_value=lock)
+    bot_user = bot.user
+    assert bot_user is not None
+    message, _, _ = _make_message(
+        mentions=[bot_user], content=f"<@{_BOT_USER_ID}> hi"
+    )
+    await bot.on_message(message)
+
+    session_manager.lock_for.assert_called_once_with(42)
+    # The lock must be released after the prompt returns.
+    assert not lock.locked()
+    # ``lock_for`` is called BEFORE ``get_or_create`` so two concurrent
+    # messages for the same user serialize through the lock rather than
+    # both racing through the existence check.
+    lock_for_call_order: int = (
+        session_manager.lock_for.call_args_list[0].__hash__()
+    )
+    get_or_create_calls: list = (
+        session_manager.get_or_create.call_args_list
+    )
+    assert get_or_create_calls, "get_or_create should have been called"
+    # Parent manager mock records the call order; the simplest check is
+    # that ``lock_for`` was awaited before ``get_or_create`` (its
+    # ``__call__`` happens first).
+    manager_call_names: list[str] = [
+        c[0] for c in session_manager.method_calls
+    ]
+    lock_idx: int = manager_call_names.index("lock_for")
+    create_idx: int = manager_call_names.index("get_or_create")
+    assert lock_idx < create_idx, (
+        "lock_for must be called before get_or_create "
+        f"(got {manager_call_names})"
+    )
+
+
+@pytest.mark.asyncio
+async def test_touches_session_on_success(
+    bot: DocBot, llm_client: MagicMock, session_manager: MagicMock
+) -> None:
+    """``session_manager.touch`` is called when the answer is non-empty."""
+    llm_client.get_answer.return_value = "a real answer"
+    bot_user = bot.user
+    assert bot_user is not None
+    message, _, _ = _make_message(
+        mentions=[bot_user], content=f"<@{_BOT_USER_ID}> hi"
+    )
+    await bot.on_message(message)
+
+    session_manager.touch.assert_called_once_with(42)
+
+
+@pytest.mark.asyncio
+async def test_does_not_touch_session_on_failure(
+    bot: DocBot, llm_client: MagicMock, session_manager: MagicMock
+) -> None:
+    """``session_manager.touch`` is NOT called when ``get_answer`` returns None."""
+    llm_client.get_answer.return_value = None
+    bot_user = bot.user
+    assert bot_user is not None
+    message, _, _ = _make_message(
+        mentions=[bot_user], content=f"<@{_BOT_USER_ID}> hi"
+    )
+    await bot.on_message(message)
+
+    session_manager.touch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_does_not_touch_session_on_empty_answer(
+    bot: DocBot, llm_client: MagicMock, session_manager: MagicMock
+) -> None:
+    """``touch`` is NOT called when ``get_answer`` returns ``""``."""
+    llm_client.get_answer.return_value = ""
+    bot_user = bot.user
+    assert bot_user is not None
+    message, _, _ = _make_message(
+        mentions=[bot_user], content=f"<@{_BOT_USER_ID}> hi"
+    )
+    await bot.on_message(message)
+
+    session_manager.touch.assert_not_called()

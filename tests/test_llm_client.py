@@ -1,322 +1,296 @@
 """Tests for :mod:`core.llm_client`.
 
-The ``opencode`` subprocess is replaced with a fake process object so the
-tests exercise :meth:`LLMClient.get_answer` without spawning a real
-``opencode`` CLI invocation. ``asyncio.create_subprocess_exec`` is patched
-to return the fake process, whose ``communicate`` coroutine yields canned
-stdout/stderr bytes.
+The :class:`OpencodeClient` is replaced with a
+:class:`FakeOpencodeClient` (or an :class:`AsyncMock`) so the tests
+exercise :meth:`LLMClient.get_answer` without a real ``opencode serve``
+server or HTTP transport.
 """
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
 from core.llm_client import LLMClient
+from core.opencode_client import OpencodeClientError
 
 
-class _FakeProc:
-    """Fake :class:`asyncio.subprocess.Process` for testing.
-
-    Attributes:
-        returncode: The exit code exposed to the caller.
-        _stdout: The bytes ``communicate`` returns as stdout.
-        _stderr: The bytes ``communicate`` returns as stderr.
-    """
-
-    def __init__(
-        self,
-        stdout: bytes = b"",
-        stderr: bytes = b"",
-        returncode: int = 0,
-    ) -> None:
-        """Initialize the fake process with canned IO output.
-
-        Args:
-            stdout: Bytes to return from ``communicate`` as stdout.
-            stderr: Bytes to return from ``communicate`` as stderr.
-            returncode: Exit code to expose after ``communicate``.
-        """
-        self.returncode: int = returncode
-        self._stdout: bytes = stdout
-        self._stderr: bytes = stderr
-
-    async def communicate(self) -> tuple[bytes, bytes]:
-        """Return the canned stdout/stderr pair."""
-        return self._stdout, self._stderr
+def _make_ndjson(*events: dict[str, object]) -> str:
+    """Build NDJSON text from a sequence of event dicts."""
+    return "\n".join(json.dumps(e) for e in events)
 
 
-def _make_stdout(*events: dict[str, object]) -> bytes:
-    """Build newline-delimited JSON stdout from a sequence of events.
+def _make_fake_client(
+    *, return_text: str = "answer", raise_error: Exception | None = None
+) -> MagicMock:
+    """Build a fake :class:`OpencodeClient` for testing.
 
     Args:
-        *events: Event dictionaries to encode, one per line.
+        return_text: The text ``prompt`` returns when ``raise_error``
+            is ``None``.
+        raise_error: Optional exception to raise from ``prompt``.
 
     Returns:
-        The JSON lines joined by newlines, encoded as UTF-8 bytes.
+        A :class:`MagicMock` whose ``prompt`` is an
+        :class:`AsyncMock` returning ``return_text`` or raising
+        ``raise_error``.
     """
-    lines: list[str] = [json.dumps(event) for event in events]
-    return "\n".join(lines).encode("utf-8")
+    client = MagicMock(name="opencode_client")
+    if raise_error is not None:
+        client.prompt = AsyncMock(side_effect=raise_error)
+    else:
+        client.prompt = AsyncMock(return_value=return_text)
+    client.create_session = AsyncMock(return_value="ses_0")
+    client.delete_session = AsyncMock(return_value=None)
+    client.close = AsyncMock(return_value=None)
+    return client
+
+
+# ---------------------------------------------------------------------------
+# get_answer — happy path
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_get_answer_concatenates_text_events() -> None:
-    """All ``text`` events are concatenated in emission order.
+async def test_get_answer_returns_concatenated_text() -> None:
+    """The text returned by ``client.prompt`` is returned verbatim.
 
-    Non-text events (e.g. tool calls) are skipped.
+    (The NDJSON parsing lives in :mod:`core.opencode_client`; the LLM
+    client just forwards the parsed string.)
     """
-    stdout = _make_stdout(
-        {"type": "text", "part": {"text": "Hello "}},
-        {"type": "tool", "name": "grep"},
-        {"type": "text", "part": {"text": "world!"}},
-    )
-    proc = _FakeProc(stdout=stdout)
-    llm = LLMClient(working_dir=Path("/tmp/repos"))
+    client = _make_fake_client(return_text="Hello world!")
+    llm = LLMClient(client=client, provider_id="opencode", model_id="m")
 
-    with patch(
-        "core.llm_client.asyncio.create_subprocess_exec",
-        new=AsyncMock(return_value=proc),
-    ):
-        answer = await llm.get_answer("how do I set spawn?")
+    answer = await llm.get_answer("q", session_id="ses_1")
 
     assert answer == "Hello world!"
 
 
 @pytest.mark.asyncio
 async def test_get_answer_returns_empty_string_when_no_text_events() -> None:
-    """No ``text`` events yields an empty string."""
-    stdout = _make_stdout(
-        {"type": "tool", "name": "read"},
-        {"type": "done"},
-    )
-    proc = _FakeProc(stdout=stdout)
-    llm = LLMClient()
+    """An empty-string prompt result is returned as ``""``."""
+    client = _make_fake_client(return_text="")
+    llm = LLMClient(client=client)
 
-    with patch(
-        "core.llm_client.asyncio.create_subprocess_exec",
-        new=AsyncMock(return_value=proc),
-    ):
-        answer = await llm.get_answer("question?")
+    answer = await llm.get_answer("q", session_id="ses_1")
 
     assert answer == ""
 
 
 @pytest.mark.asyncio
-async def test_get_answer_returns_empty_string_on_empty_stdout() -> None:
-    """Empty stdout yields an empty string."""
-    proc = _FakeProc(stdout=b"")
-    llm = LLMClient()
+async def test_get_answer_appends_length_constraint_to_query() -> None:
+    """The query is augmented with the <2000-char constraint before sending."""
+    client = _make_fake_client()
+    llm = LLMClient(client=client)
 
-    with patch(
-        "core.llm_client.asyncio.create_subprocess_exec",
-        new=AsyncMock(return_value=proc),
-    ):
-        assert await llm.get_answer("q") == ""
+    await llm.get_answer("how do I set spawn?", session_id="ses_1")
+
+    client.prompt.assert_awaited_once()
+    kwargs = client.prompt.await_args.kwargs
+    parts = kwargs["parts"]
+    assert len(parts) == 1
+    text: str = parts[0]["text"]  # type: ignore[index]
+    assert "how do I set spawn?" in text
+    assert "Keep your answer less than 2000 characters." in text
 
 
-@pytest.mark.asyncio
-async def test_get_answer_skips_malformed_json_lines() -> None:
-    """Non-JSON lines are skipped without aborting the parse."""
-    stdout = (
-        b'{"type":"text","part":{"text":"part 1 "}}\n'
-        b"not json at all\n"
-        b'{"type":"text","part":{"text":"part 2"}}\n'
-    )
-    proc = _FakeProc(stdout=stdout)
-    llm = LLMClient()
-
-    with patch(
-        "core.llm_client.asyncio.create_subprocess_exec",
-        new=AsyncMock(return_value=proc),
-    ):
-        answer = await llm.get_answer("q")
-
-    assert answer == "part 1 part 2"
+# ---------------------------------------------------------------------------
+# get_answer — session_id handling
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_get_answer_skips_blank_lines() -> None:
-    """Blank lines in stdout are tolerated."""
-    stdout = (
-        b'\n{"type":"text","part":{"text":"A"}}\n\n\n'
-        b'{"type":"text","part":{"text":"B"}}\n\n'
-    )
-    proc = _FakeProc(stdout=stdout)
-    llm = LLMClient()
+async def test_get_answer_returns_none_when_session_id_missing() -> None:
+    """A ``None`` session_id is a programming error → return ``None`` + warn."""
+    client = _make_fake_client()
+    llm = LLMClient(client=client)
 
-    with patch(
-        "core.llm_client.asyncio.create_subprocess_exec",
-        new=AsyncMock(return_value=proc),
-    ):
-        answer = await llm.get_answer("q")
+    answer = await llm.get_answer("q", session_id=None)
 
-    assert answer == "AB"
+    assert answer is None
+    client.prompt.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_get_answer_skips_text_event_with_non_string_text() -> None:
-    """A ``text`` event whose ``text`` field is not a string is skipped."""
-    stdout = _make_stdout(
-        {"type": "text", "part": {"text": 123}},
-        {"type": "text", "part": {"text": None}},
-        {"type": "text", "part": {"text": "real"}},
-    )
-    proc = _FakeProc(stdout=stdout)
-    llm = LLMClient()
+async def test_get_answer_passes_session_id() -> None:
+    """The ``session_id`` is forwarded to ``client.prompt``."""
+    client = _make_fake_client()
+    llm = LLMClient(client=client)
 
-    with patch(
-        "core.llm_client.asyncio.create_subprocess_exec",
-        new=AsyncMock(return_value=proc),
-    ):
-        answer = await llm.get_answer("q")
+    await llm.get_answer("q", session_id="ses_42")
 
-    assert answer == "real"
+    kwargs = client.prompt.await_args.kwargs
+    assert kwargs["session_id"] == "ses_42"
+
+
+# ---------------------------------------------------------------------------
+# get_answer — error handling
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_get_answer_invokes_opencode_with_expected_args() -> None:
-    """The subprocess is spawned with the configured agent, dir, and query."""
-    proc = _FakeProc(stdout=_make_stdout({"type": "text", "part": {"text": "ans"}}))
-    mock_exec = AsyncMock(return_value=proc)
-    llm = LLMClient(
-        agent="docbot",
-        working_dir=Path("/srv/repos"),
-        opencode_bin="opencode",
-    )
-
-    with patch("core.llm_client.asyncio.create_subprocess_exec", new=mock_exec):
-        await llm.get_answer("what is the max stack?")
-
-    mock_exec.assert_awaited_once()
-    assert mock_exec.await_args is not None
-    args = mock_exec.await_args.args
-    # opencode run --agent docbot --format json --dir /srv/repos <query>
-    assert args[0] == "opencode"
-    assert args[1] == "run"
-    assert "--agent" in args
-    assert "docbot" in args
-    assert "--format" in args
-    assert "json" in args
-    assert "--dir" in args
-    assert "/srv/repos" in args
-    assert "what is the max stack?\n\n Keep your answer less than 2000 characters." in args
-
-
-@pytest.mark.asyncio
-async def test_get_answer_uses_custom_opencode_bin() -> None:
-    """A custom ``opencode_bin`` is used as the executable."""
-    proc = _FakeProc(stdout=_make_stdout({"type": "text", "part": {"text": "x"}}))
-    mock_exec = AsyncMock(return_value=proc)
-    llm = LLMClient(opencode_bin="/usr/local/bin/opencode")
-
-    with patch("core.llm_client.asyncio.create_subprocess_exec", new=mock_exec):
-        await llm.get_answer("q")
-
-    assert mock_exec.await_args is not None
-    assert mock_exec.await_args.args[0] == "/usr/local/bin/opencode"
-
-
-@pytest.mark.asyncio
-async def test_get_answer_uses_custom_agent() -> None:
-    """A custom agent name is passed via ``--agent``."""
-    proc = _FakeProc(stdout=_make_stdout({"type": "text", "part": {"text": "x"}}))
-    mock_exec = AsyncMock(return_value=proc)
-    llm = LLMClient(agent="custom-agent")
-
-    with patch("core.llm_client.asyncio.create_subprocess_exec", new=mock_exec):
-        await llm.get_answer("q")
-
-    assert mock_exec.await_args is not None
-    args = mock_exec.await_args.args
-    agent_idx = args.index("--agent")
-    assert args[agent_idx + 1] == "custom-agent"
-
-
-@pytest.mark.asyncio
-async def test_get_answer_returns_text_on_nonzero_exit(
+async def test_get_answer_returns_none_on_client_error(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A non-zero exit code is logged as an error but text is still returned."""
+    """An :class:`OpencodeClientError` → ``None`` + diagnostic log."""
     import logging
 
-    proc = _FakeProc(
-        stdout=_make_stdout({"type": "text", "part": {"text": "partial"}}),
-        stderr=b"something went wrong",
-        returncode=1,
+    client = _make_fake_client(
+        raise_error=OpencodeClientError("prompt failed: 500")
     )
-    llm = LLMClient()
+    llm = LLMClient(
+        client=client,
+        agent="docbot",
+        provider_id="opencode",
+        model_id="deepseek-v4-flash-free",
+        variant="max",
+    )
 
     caplog.set_level(logging.ERROR, logger="core.llm_client")
-    with patch(
-        "core.llm_client.asyncio.create_subprocess_exec",
-        new=AsyncMock(return_value=proc),
-    ):
-        answer = await llm.get_answer("q")
+    answer = await llm.get_answer("q", session_id="ses_1")
 
-    assert answer == "partial"
-    assert any(
-        "code 1" in record.message for record in caplog.records
+    assert answer is None
+    messages = "\n".join(r.message for r in caplog.records)
+    assert "opencode prompt failed" in messages
+    assert "agent=docbot" in messages
+    assert "provider=opencode" in messages
+    assert "model=deepseek-v4-flash-free" in messages
+    assert "variant=max" in messages
+    assert "session=ses_1" in messages
+
+
+@pytest.mark.asyncio
+async def test_get_answer_returns_none_on_http_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An :class:`httpx.HTTPError` → ``None`` + diagnostic log."""
+    import logging
+
+    client = _make_fake_client(
+        raise_error=httpx.ConnectError("connection refused")
     )
+    llm = LLMClient(
+        client=client,
+        provider_id="opencode",
+        model_id="m",
+    )
+
+    caplog.set_level(logging.ERROR, logger="core.llm_client")
+    answer = await llm.get_answer("q", session_id="ses_1")
+
+    assert answer is None
+    assert any(
+        "opencode prompt failed" in r.message for r in caplog.records
+    )
+
+
+# ---------------------------------------------------------------------------
+# get_answer — provider/model/variant overrides
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_answer_uses_instance_defaults() -> None:
+    """Instance-level provider/model/variant are forwarded to ``prompt``."""
+    client = _make_fake_client()
+    llm = LLMClient(
+        client=client,
+        agent="docbot",
+        provider_id="opencode",
+        model_id="deepseek-v4-flash-free",
+        variant="max",
+    )
+
+    await llm.get_answer("q", session_id="ses_1")
+
+    kwargs = client.prompt.await_args.kwargs
+    assert kwargs["agent"] == "docbot"
+    assert kwargs["provider_id"] == "opencode"
+    assert kwargs["model_id"] == "deepseek-v4-flash-free"
+    assert kwargs["variant"] == "max"
+
+
+@pytest.mark.asyncio
+async def test_get_answer_per_call_override_wins() -> None:
+    """Per-call kwargs override the instance defaults."""
+    client = _make_fake_client()
+    llm = LLMClient(
+        client=client,
+        provider_id="opencode",
+        model_id="deepseek-v4-flash-free",
+        variant="max",
+    )
+
+    await llm.get_answer(
+        "q",
+        session_id="ses_1",
+        provider_id="anthropic",
+        model_id="claude-sonnet-4-5",
+        variant="low",
+    )
+
+    kwargs = client.prompt.await_args.kwargs
+    assert kwargs["provider_id"] == "anthropic"
+    assert kwargs["model_id"] == "claude-sonnet-4-5"
+    assert kwargs["variant"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_get_answer_variant_none_omitted_from_prompt_kwargs() -> None:
+    """When variant is ``None`` at both levels, ``variant`` is ``None``.
+
+    The LLM client always passes ``variant=<effective>`` to
+    ``client.prompt``; when the effective value is ``None`` the
+    :class:`OpencodeClient` omits the key from the HTTP body (tested
+    in :mod:`tests.test_opencode_client`). Here we just assert the
+    LLM client forwards ``None``.
+    """
+    client = _make_fake_client()
+    llm = LLMClient(
+        client=client,
+        provider_id="opencode",
+        model_id="m",
+        variant=None,
+    )
+
+    await llm.get_answer("q", session_id="ses_1")
+
+    kwargs = client.prompt.await_args.kwargs
+    assert kwargs["variant"] is None
+
+
+# ---------------------------------------------------------------------------
+# Constructor
+# ---------------------------------------------------------------------------
 
 
 def test_constructor_stores_attributes() -> None:
-    """Agent, working_dir, and opencode_bin are stored as attributes."""
+    """The injected client and defaults are stored as attributes."""
+    client = _make_fake_client()
     llm = LLMClient(
+        client=client,
         agent="my-agent",
-        working_dir=Path("/data/repos"),
-        opencode_bin="/opt/opencode",
+        provider_id="anthropic",
+        model_id="claude-sonnet-4-5",
+        variant="max",
     )
 
+    assert llm.client is client
     assert llm.agent == "my-agent"
-    assert llm.working_dir == Path("/data/repos")
-    assert llm.opencode_bin == "/opt/opencode"
+    assert llm.provider_id == "anthropic"
+    assert llm.model_id == "claude-sonnet-4-5"
+    assert llm.variant == "max"
 
 
 def test_constructor_defaults() -> None:
-    """Defaults are ``docbot``, ``data/repos``, and ``opencode``."""
-    llm = LLMClient()
+    """Defaults are ``docbot`` and ``None`` for provider/model/variant."""
+    client = _make_fake_client()
+    llm = LLMClient(client=client)
 
     assert llm.agent == "docbot"
-    assert llm.working_dir == Path("data/repos")
-    assert llm.opencode_bin == "opencode"
-
-
-def test_constructor_accepts_string_working_dir() -> None:
-    """A string ``working_dir`` is normalized to a :class:`Path`."""
-    llm = LLMClient(working_dir="/var/repos")
-
-    assert llm.working_dir == Path("/var/repos")
-    assert isinstance(llm.working_dir, Path)
-
-
-def test_extract_text_concatenates_text_events() -> None:
-    """``_extract_text`` concatenates ``text`` events from JSON lines."""
-    stdout = _make_stdout(
-        {"type": "text", "part": {"text": "A"}},
-        {"type": "tool", "name": "bash"},
-        {"type": "text", "part": {"text": "B"}},
-    ).decode("utf-8")
-
-    assert LLMClient._extract_text(stdout) == "AB"
-
-
-def test_extract_text_returns_empty_on_no_text() -> None:
-    """``_extract_text`` returns an empty string when there are no text events."""
-    stdout = _make_stdout({"type": "done"}).decode("utf-8")
-
-    assert LLMClient._extract_text(stdout) == ""
-
-
-def test_extract_text_returns_empty_on_empty_string() -> None:
-    """``_extract_text`` returns an empty string for empty input."""
-    assert LLMClient._extract_text("") == ""
-
-
-def test_extract_text_skips_malformed_lines() -> None:
-    """Malformed JSON lines are skipped without raising."""
-    stdout = '{"type":"text","part":{"text":"ok"}}\nGARBAGE\n{"type":"text","part":{"text":"!"}}'
-
-    assert LLMClient._extract_text(stdout) == "ok!"
+    assert llm.provider_id is None
+    assert llm.model_id is None
+    assert llm.variant is None
