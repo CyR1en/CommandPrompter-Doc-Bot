@@ -46,6 +46,7 @@ import discord
 
 from core.llm_client import LLMClient
 from core.logger import get_logger
+from core.markdown_sanitizer import sanitize_markdown
 from core.message_splitter import split_message
 from core.rate_limiter import RateLimiter
 from core.session_manager import SessionManager
@@ -240,14 +241,18 @@ class DocBot(discord.Client):
            from the content, the user's opencode session is looked up
            (or created), a typing indicator is shown, and the remaining
            text is passed to :meth:`LLMClient.get_answer` under the
-           per-user lock. The answer is delivered as a chain of embeds
-           via :meth:`_send_embeds` (the first embed replies to
-           ``message``; answers that exceed the per-embed description
-           budget are split by :func:`core.message_splitter.split_message`
-           and the rest are posted as embeds replying to the previous
-           bot message, with a ``"Page i/N"`` footer on every page).
-           On a non-empty answer the session's ``last_active`` is
-           refreshed so the TTL clock keeps rolling.
+           per-user lock. The answer is run through
+           :func:`core.markdown_sanitizer.sanitize_markdown` to rewrite
+           Discord-incompatible markdown (GFM tables, horizontal rules,
+           H4+ headers) into Discord-friendly equivalents, then
+           delivered as a chain of embeds via :meth:`_send_embeds`
+           (the first embed replies to ``message``; answers that
+           exceed the per-embed description budget are split by
+           :func:`core.message_splitter.split_message` and the rest
+           are posted as embeds replying to the previous bot message,
+           with a ``"Page i/N"`` footer on every page). On a non-empty
+           answer the session's ``last_active`` is refreshed so the
+           TTL clock keeps rolling.
 
         Args:
             message: The inbound Discord message.
@@ -329,6 +334,13 @@ class DocBot(discord.Client):
         # so a slow touch does not block other users.
         if answer:
             self.session_manager.touch(user_id)
+            # Rewrite Discord-incompatible markdown (GFM tables,
+            # horizontal rules, H4+ headers) into Discord-compatible
+            # equivalents before delivery. Defense-in-depth — the
+            # agent persona already tells the model to avoid these,
+            # but the sanitizer guarantees the user never sees
+            # broken rendering.
+            answer = sanitize_markdown(answer)
 
         # ``get_answer`` returns ``None`` when the HTTP call failed
         # (with diagnostic info already logged) and ``""`` when the
