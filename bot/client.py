@@ -45,6 +45,7 @@ import discord
 
 from core.llm_client import LLMClient
 from core.logger import get_logger
+from core.message_splitter import split_message
 from core.rate_limiter import RateLimiter
 from core.session_manager import SessionManager
 
@@ -168,9 +169,13 @@ class DocBot(discord.Client):
            from the content, the user's opencode session is looked up
            (or created), a typing indicator is shown, and the remaining
            text is passed to :meth:`LLMClient.get_answer` under the
-           per-user lock. The answer is sent back as a reply to the
-           message. On a non-empty answer the session's ``last_active``
-           is refreshed so the TTL clock keeps rolling.
+           per-user lock. The answer is sent back as a reply chain (the
+           first chunk replies to ``message``; longer answers that exceed
+           Discord's 2000-character per-message limit are split by
+           :func:`core.message_splitter.split_message` and the rest are
+           posted as replies to the previous bot message). On a non-empty
+           answer the session's ``last_active`` is refreshed so the TTL
+           clock keeps rolling.
 
         Args:
             message: The inbound Discord message.
@@ -271,7 +276,40 @@ class DocBot(discord.Client):
             )
             return
 
-        await message.reply(answer)
+        await self._send_chunked(message.channel, answer, reference=message)
+
+    async def _send_chunked(
+        self,
+        channel: discord.abc.Messageable,
+        text: str,
+        *,
+        reference: discord.Message,
+    ) -> None:
+        """Send ``text`` to ``channel`` as a chain of Discord-safe replies.
+
+        Discord rejects messages longer than 2000 characters with HTTP
+        400. This helper splits the text with
+        :func:`core.message_splitter.split_message` and posts each chunk
+        sequentially: the first chunk is a reply to ``reference`` (the
+        user's @mention message) and each subsequent chunk is a reply to
+        the previous bot message, so Discord's UI chains them visually
+        and the user sees a single threaded response.
+
+        Args:
+            channel: The Discord channel/textable to send the chunks to.
+            text: The text to send. May exceed Discord's per-message
+                limit; the helper handles splitting.
+            reference: The user's original @mention message. The first
+                chunk is posted as a reply to this message.
+        """
+        chunks: list[str] = split_message(text)
+        # First chunk: reply to the user's message so the response is
+        # threaded under their question.
+        previous: discord.Message = await reference.reply(chunks[0])
+        # Subsequent chunks: reply to the previous bot message so
+        # Discord chains them visually.
+        for chunk in chunks[1:]:
+            previous = await previous.reply(chunk)
 
     def _extract_query(self, message: discord.Message) -> str:
         """Strip the bot's mention tokens from ``message.content``.
