@@ -39,6 +39,7 @@ cloned repositories directly from the server's working directory
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 import discord
@@ -50,6 +51,70 @@ from core.rate_limiter import RateLimiter
 from core.session_manager import SessionManager
 
 _logger = get_logger(__name__)
+
+
+#: Maximum characters per embed ``description`` field. Discord's hard
+#: limit is 4096 — we use 3800 to leave a small safety margin for
+#: future footer/timestamp tweaks and to avoid hitting the cap on
+#: text the splitter was unable to shrink (e.g. a single code block
+#: longer than the limit).
+_EMBED_DESCRIPTION_LIMIT: int = 3800
+
+#: Brand color for bot embeds. Discord's official blurple accent
+#: (``#5865F2``) — fits a Discord bot and stays visually consistent
+#: across all answers.
+_EMBED_COLOR: discord.Colour = discord.Colour(0x5865F2)
+
+#: Footer text used when an answer spans more than one embed page.
+#: ``{current}`` is the 1-based page index, ``{total}`` the total
+#: number of pages. Kept short so it does not eat into the
+#: description's character budget.
+_PAGE_FOOTER: str = "Page {current}/{total}"
+
+
+def _build_answer_embeds(text: str) -> list[discord.Embed]:
+    """Wrap an LLM answer into a chain of Discord embeds.
+
+    Splits ``text`` into chunks that each fit inside an embed
+    ``description`` field (:data:`_EMBED_DESCRIPTION_LIMIT` characters),
+    then wraps each chunk in an embed with:
+
+    * ``description`` — the chunk of the answer (carries the prose,
+      including any code blocks; triple-backtick fences are preserved
+      across chunk boundaries by :func:`core.message_splitter.split_message`).
+    * ``color`` — the bot's brand color (:data:`_EMBED_COLOR`).
+    * ``timestamp`` — UTC "now", so the embed footer shows when the
+      answer was generated.
+    * ``footer`` — ``"Page i/N"`` when the answer spans more than one
+      page. Short answers (single page) do not get a footer so the
+      response stays visually quiet.
+
+    Args:
+        text: The LLM-generated answer. May be empty (an empty
+            description is allowed) or arbitrarily long (will be split
+            into multiple embeds).
+
+    Returns:
+        A non-empty list of embeds in the same order as the chunks
+        they wrap. ``split_message`` always returns at least one
+        element, so this never returns an empty list.
+    """
+    chunks: list[str] = split_message(text, limit=_EMBED_DESCRIPTION_LIMIT)
+    total: int = len(chunks)
+    now: datetime = datetime.now(timezone.utc)
+    embeds: list[discord.Embed] = []
+    for index, chunk in enumerate(chunks, start=1):
+        embed: discord.Embed = discord.Embed(
+            description=chunk,
+            color=_EMBED_COLOR,
+            timestamp=now,
+        )
+        if total > 1:
+            embed.set_footer(text=_PAGE_FOOTER.format(
+                current=index, total=total,
+            ))
+        embeds.append(embed)
+    return embeds
 
 
 def _default_intents() -> discord.Intents:
@@ -78,7 +143,13 @@ class DocBot(discord.Client):
     per-user opencode session via the injected
     :class:`SessionManager`, serialized behind a per-user lock, and
     forwarded to :meth:`LLMClient.get_answer` while a typing indicator
-    is shown to the user. The answer is sent back as a reply.
+    is shown to the user. The answer is delivered as one or more
+    :class:`discord.Embed` reply messages (built by
+    :func:`_build_answer_embeds`), so the response renders as a
+    Discord card with a consistent brand color, a generation
+    timestamp, and — for long answers — a ``"Page i/N"`` footer.
+    Oversized answers are split across multiple embeds with
+    triple-backtick code-block fences preserved across pages.
 
     Attributes:
         rate_limiter: Sliding-window limiter used to gate per-user
@@ -169,13 +240,14 @@ class DocBot(discord.Client):
            from the content, the user's opencode session is looked up
            (or created), a typing indicator is shown, and the remaining
            text is passed to :meth:`LLMClient.get_answer` under the
-           per-user lock. The answer is sent back as a reply chain (the
-           first chunk replies to ``message``; longer answers that exceed
-           Discord's 2000-character per-message limit are split by
-           :func:`core.message_splitter.split_message` and the rest are
-           posted as replies to the previous bot message). On a non-empty
-           answer the session's ``last_active`` is refreshed so the TTL
-           clock keeps rolling.
+           per-user lock. The answer is delivered as a chain of embeds
+           via :meth:`_send_embeds` (the first embed replies to
+           ``message``; answers that exceed the per-embed description
+           budget are split by :func:`core.message_splitter.split_message`
+           and the rest are posted as embeds replying to the previous
+           bot message, with a ``"Page i/N"`` footer on every page).
+           On a non-empty answer the session's ``last_active`` is
+           refreshed so the TTL clock keeps rolling.
 
         Args:
             message: The inbound Discord message.
@@ -276,40 +348,47 @@ class DocBot(discord.Client):
             )
             return
 
-        await self._send_chunked(message.channel, answer, reference=message)
+        await self._send_embeds(message.channel, answer, reference=message)
 
-    async def _send_chunked(
+    async def _send_embeds(
         self,
         channel: discord.abc.Messageable,
         text: str,
         *,
         reference: discord.Message,
     ) -> None:
-        """Send ``text`` to ``channel`` as a chain of Discord-safe replies.
+        """Send ``text`` to ``channel`` as a chain of reply embeds.
 
-        Discord rejects messages longer than 2000 characters with HTTP
-        400. This helper splits the text with
-        :func:`core.message_splitter.split_message` and posts each chunk
-        sequentially: the first chunk is a reply to ``reference`` (the
-        user's @mention message) and each subsequent chunk is a reply to
-        the previous bot message, so Discord's UI chains them visually
-        and the user sees a single threaded response.
+        Wraps the answer into one or more :class:`discord.Embed` objects
+        via :func:`_build_answer_embeds` and posts them sequentially.
+        The first embed is a reply to ``reference`` (the user's
+        @mention message); each subsequent embed is a reply to the
+        previous bot message, so Discord's UI chains them into a
+        single threaded response. Long answers are paginated by the
+        splitter (one embed per page, with a ``"Page i/N"`` footer).
 
         Args:
-            channel: The Discord channel/textable to send the chunks to.
-            text: The text to send. May exceed Discord's per-message
-                limit; the helper handles splitting.
-            reference: The user's original @mention message. The first
-                chunk is posted as a reply to this message.
+            channel: The Discord channel/textable the embeds are
+                posted to. Currently unused (the chain is anchored on
+                ``reference`` and ``previous`` messages) but kept in
+                the signature for symmetry with the previous helper
+                and for future use (e.g. cross-posting to a log
+                channel).
+            text: The LLM-generated answer. May be empty (yields a
+                single empty-description embed) or arbitrarily long
+                (will be split into multiple embeds).
+            reference: The user's original @mention message. The
+                first embed is posted as a reply to this message.
         """
-        chunks: list[str] = split_message(text)
-        # First chunk: reply to the user's message so the response is
+        del channel  # currently unused; kept for future cross-posting
+        embeds: list[discord.Embed] = _build_answer_embeds(text)
+        # First embed: reply to the user's message so the response is
         # threaded under their question.
-        previous: discord.Message = await reference.reply(chunks[0])
-        # Subsequent chunks: reply to the previous bot message so
+        previous: discord.Message = await reference.reply(embed=embeds[0])
+        # Subsequent embeds: reply to the previous bot message so
         # Discord chains them visually.
-        for chunk in chunks[1:]:
-            previous = await previous.reply(chunk)
+        for embed in embeds[1:]:
+            previous = await previous.reply(embed=embed)
 
     def _extract_query(self, message: discord.Message) -> str:
         """Strip the bot's mention tokens from ``message.content``.

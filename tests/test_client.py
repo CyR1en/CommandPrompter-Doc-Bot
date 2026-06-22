@@ -343,8 +343,12 @@ async def test_answers_mention_query(
     # The query is the first positional arg, stripped of the mention.
     query_arg: str = llm_client.get_answer.await_args.args[0]
     assert query_arg == "how do I set the spawn point?"
-    # Reply sent.
-    message.reply.assert_awaited_once_with("Use /setspawn to set the spawn.")
+    # Reply sent as an embed (the bot delivers answers as embeds so
+    # long responses can span multiple pages without hitting
+    # Discord's 2000-character plain-message cap).
+    message.reply.assert_awaited_once()
+    sent_embed = message.reply.await_args.kwargs["embed"]
+    assert sent_embed.description == "Use /setspawn to set the spawn."
     assert tracker.entered == 1
     assert tracker.exited == 1
     # Session was touched on success.
@@ -575,7 +579,10 @@ async def test_answers_role_mention_query(
 
     query_arg: str = llm_client.get_answer.await_args.args[0]
     assert query_arg == "how do I set the spawn point?"
-    message.reply.assert_awaited_once_with("Use /setspawn to set the spawn.")
+    # Reply sent as an embed (see _send_embeds).
+    message.reply.assert_awaited_once()
+    sent_embed = message.reply.await_args.kwargs["embed"]
+    assert sent_embed.description == "Use /setspawn to set the spawn."
     assert tracker.entered == 1
     assert tracker.exited == 1
 
