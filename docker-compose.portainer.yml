@@ -1,0 +1,32 @@
+# CMDP Doc Bot — Portainer stack
+#
+# Paste this into Portainer → Stacks → Add stack → Web editor (or upload
+# the file). The bot image is pulled from GHCR; persistent state (cloned
+# repos) lives in a named Docker volume so it survives stack redeployments
+# and is managed through the Portainer Volumes UI.
+#
+# Configuration:
+#   * ``env_file`` points at ``./.env`` (relative to the stack). In
+#     Portainer, that resolves to the stack's working directory — usually
+#     fine, but if you'd rather keep the env file elsewhere on the host
+#     change it to an absolute path (e.g. ``/opt/cmdp-doc-bot/.env``).
+#   * Alternatively, delete the ``env_file:`` block and use an
+#     ``environment:`` block below to set each var inline.
+#
+# If the GHCR package is ever made private, add a registry credential in
+# Portainer (Settings → Registries) before deploying.
+
+services:
+  bot:
+    image: ghcr.io/cyr1en/cmdp_doc_bot:latest
+    # ``:latest`` is a moving tag — always re-pull on stack up so security
+    # fixes flow through without a manual pull.
+    pull_policy: always
+    env_file:
+      - .env
+    volumes:
+      - cmdp_doc_bot_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  cmdp_doc_bot_data:
