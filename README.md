@@ -88,10 +88,11 @@ flowchart LR
 - **AGENT.md auto-generation** — after a repo is cloned or updated, the bot asks opencode to produce an `AGENT.md` index in the repo root, which the answering agent uses to navigate the codebase.
 - **Provider-agnostic** — works with any built-in OpenCode provider (OpenCode Zen, Anthropic, OpenAI, Google, Groq, Mistral, …) without writing custom provider blocks. A `custom-llm` shim is available for arbitrary OpenAI-compatible endpoints.
 - **Independent generator config** — the AGENT.md generator can be routed through a different provider/model/variant than the answer flow (e.g. a cheap fast model for preprocessing, a stronger one for answering).
+- **Embed-based answer delivery** — answers are delivered as Discord embeds (with a brand color and per-page footer on long responses), so verbose LLM answers don't hit Discord's 2000-character plain-message cap. Long answers auto-paginate across multiple embeds with triple-backtick code blocks preserved across pages.
 - **In-memory rate limiting** — per-user sliding window (5 questions / 10 min by default) to control abuse and LLM cost. Resets on restart.
 - **Type-safe config** — `pydantic-settings` validates the environment at startup, with a graceful message if `.env` is missing.
 - **Docker-first** — a single `docker compose up` brings the whole stack up. A drop-in Portainer stack file is included.
-- **Hermetic test suite** — 190+ `pytest` tests with fakes for the LLM client, Git manager, and Discord client; no live API keys or network access needed.
+- **Hermetic test suite** — 220+ `pytest` tests with fakes for the LLM client, Git manager, and Discord client; no live API keys or network access needed.
 
 ---
 
@@ -279,7 +280,7 @@ The bot reads `.env` from the current working directory and writes persistent st
 
 1. **Startup** — load settings from `.env`, map `LLM_API_KEY` to the active provider's env var, write `opencode.json` + the `docbot` agent persona, start the `opencode serve` subprocess on `127.0.0.1:4096`, build the per-user session manager, repository manager, rate limiter, LLM client, and Discord client, and start two background tasks (repository polling + session sweeping).
 2. **Polling & AGENT.md generation** — every `POLL_INTERVAL_MINUTES`, a background `discord.ext.tasks.loop` pulls each repo into `data/repos/<name>`. For any repo that was just cloned or updated, the bot opens a transient opencode session and asks it (using the opencode server's default agent — not `docbot`) to produce an `AGENT.md` index in the repo root. The generator swallows per-repo errors so one bad repo can't crash the loop.
-3. **Answering** — on `@mention`, the bot strips its mention, checks the user's rate limit, looks up or creates the user's opencode session (with the `docbot` agent), acquires a per-user lock, and prompts the session via the opencode HTTP API (`POST /session/:id/message`). It concatenates the `text` events from the streamed NDJSON response into a single reply. A non-empty reply refreshes the session's `last_active` so the TTL clock keeps rolling.
+3. **Answering** — on `@mention`, the bot strips its mention, checks the user's rate limit, looks up or creates the user's opencode session (with the `docbot` agent), acquires a per-user lock, and prompts the session via the opencode HTTP API (`POST /session/:id/message`). It concatenates the `text` events from the streamed NDJSON response into a single answer, then wraps that answer in one or more Discord embeds (Discord's per-embed description limit is 4 096 chars; the bot uses 3 800 for headroom). Long answers are auto-paginated — each page is its own embed, with a `Page i/N` footer on multi-page responses, and triple-backtick code blocks are preserved across pages so Discord's markdown renderer still sees valid fences. The first embed is posted as a reply to the user's `@mention`; subsequent pages are replies to the previous bot message, so Discord threads the response visually. A non-empty answer refreshes the session's `last_active` so the TTL clock keeps rolling.
 4. **Session sweeping** — every minute, expired sessions (idle > `SESSION_TTL_MINUTES`) are deleted on the opencode server and removed from the in-memory mapping. The next message from that user gets a fresh session.
 
 ### Why per-user sessions?
