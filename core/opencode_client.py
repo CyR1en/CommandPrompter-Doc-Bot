@@ -170,15 +170,15 @@ class OpencodeClient:
         self,
         *,
         title: str,
-        agent: str,
         provider_id: str,
         model_id: str,
+        agent: str | None = None,
     ) -> str:
         """Create a new opencode session and return its id.
 
-        Sends ``POST /session`` with the title, agent, and model
-        (``{id, providerID}``). The server generates and returns a
-        ``ses_<26-char ULID>`` id.
+        Sends ``POST /session`` with the title, optional agent, and
+        model (``{id, providerID}``). The server generates and returns
+        a ``ses_<26-char ULID>`` id.
 
         Note:
             The ``CreateInput`` schema on the opencode server
@@ -193,11 +193,15 @@ class OpencodeClient:
         Args:
             title: Human-readable session title (e.g.
                 ``"discord:<user_id>"``).
-            agent: Agent entry to use (e.g. ``"docbot"``). The agent
-                persona is loaded per-prompt when this is passed.
             provider_id: Provider ID (e.g. ``"opencode"``,
                 ``"anthropic"``).
             model_id: Bare model id (e.g. ``"deepseek-v4-flash-free"``).
+            agent: Optional agent entry to use (e.g. ``"docbot"``).
+                ``None`` (the default) omits the field so the opencode
+                server uses its built-in default agent. The bot's
+                :class:`core.llm_client.LLMClient` always passes
+                ``"docbot"``; the AGENT.md-generation helper in
+                :mod:`bot.tasks` passes ``None``.
 
         Returns:
             The auto-generated session id (e.g.
@@ -210,9 +214,10 @@ class OpencodeClient:
         """
         body: dict[str, Any] = {
             "title": title,
-            "agent": agent,
             "model": {"id": model_id, "providerID": provider_id},
         }
+        if agent is not None:
+            body["agent"] = agent
         try:
             resp = await self._client.post("/session", json=body)
             resp.raise_for_status()
@@ -246,35 +251,37 @@ class OpencodeClient:
         *,
         session_id: str,
         parts: list[dict[str, object]],
-        agent: str,
         provider_id: str,
         model_id: str,
+        agent: str | None = None,
         variant: str | None = None,
     ) -> str:
         """Send a prompt to a session and return the concatenated text.
 
         Sends ``POST /session/:id/message`` with the message parts,
-        agent, model, optional variant, and ``format: {type: "json"}``
-        (which makes the server stream NDJSON events with the same
-        shape as ``opencode run --format json`` output). Reads the full
-        response body, parses it line-by-line, and concatenates the
-        ``text`` events.
+        optional agent, model, and optional variant. Reads the full
+        response body (a single JSON ``{info, parts}`` object) and
+        concatenates the ``text`` parts.
 
         Args:
             session_id: The session id returned by :meth:`create_session`.
             parts: Message parts, e.g.
                 ``[{"type": "text", "text": "the user's question"}]``.
-            agent: Agent entry to use (e.g. ``"docbot"``). Passed on
-                every prompt so the server loads the persona fresh.
             provider_id: Provider ID (e.g. ``"opencode"``).
             model_id: Bare model id (e.g. ``"deepseek-v4-flash-free"``).
+            agent: Optional agent entry to use (e.g. ``"docbot"``).
+                ``None`` (the default) omits the field so the opencode
+                server uses its built-in default agent. The bot's
+                :class:`core.llm_client.LLMClient` always passes
+                ``"docbot"``; the AGENT.md-generation helper in
+                :mod:`bot.tasks` passes ``None``.
             variant: Optional reasoning-effort variant (e.g.
                 ``"max"``). ``None`` lets the model use its default.
 
         Returns:
-            The concatenated ``text`` content from the streaming NDJSON
-            response. Returns an empty string when the server returned
-            HTTP 200 but the agent emitted no ``text`` events.
+            The concatenated ``text`` content from the response
+            ``parts``. Returns an empty string when the server returned
+            HTTP 200 but the agent emitted no ``text`` parts.
 
         Raises:
             OpencodeClientError: If the HTTP call fails (4xx/5xx,
@@ -283,9 +290,10 @@ class OpencodeClient:
         """
         body: dict[str, Any] = {
             "parts": parts,
-            "agent": agent,
             "model": {"providerID": provider_id, "modelID": model_id},
         }
+        if agent is not None:
+            body["agent"] = agent
         if variant is not None:
             body["variant"] = variant
         url: str = f"/session/{session_id}/message"
