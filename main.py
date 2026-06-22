@@ -246,12 +246,21 @@ async def _run_bot(settings: Settings, logger: logging.Logger) -> None:
     )
 
     # --- Background tasks -----------------------------------------------
+    # The validator in Settings guarantees AGENT_MD_PROVIDER and AGENT_MD_MODEL
+    # are resolved to non-None values (falling back to the LLM_* settings).
+    assert settings.AGENT_MD_PROVIDER is not None
+    assert settings.AGENT_MD_MODEL is not None
+
     poll_task = build_polling_task(
         repo_manager=repo_manager,
         repo_urls=settings.REPO_URLS,
         poll_interval_minutes=settings.POLL_INTERVAL_MINUTES,
         repos_root=_REPOS_ROOT,
         token=settings.GITHUB_TOKEN,
+        client=client,
+        provider_id=settings.AGENT_MD_PROVIDER,
+        model_id=settings.AGENT_MD_MODEL,
+        variant=settings.AGENT_MD_VARIANT,
     )
     sweep_task = build_session_sweeper_task(
         session_manager=session_manager,

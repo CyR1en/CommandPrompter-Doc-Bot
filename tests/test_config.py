@@ -285,3 +285,83 @@ def test_settings_github_token_custom(
         clear_settings_cache()
 
     assert settings.GITHUB_TOKEN == "my-github-token"
+
+
+def test_settings_agent_md_defaults_to_ll(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """AGENT_MD_* fall back to LLM_* when unset."""
+    _set_required_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("REPO_URLS", "https://a.git")
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("LLM_MODEL", "claude-sonnet-4-5")
+    monkeypatch.setenv("LLM_VARIANT", "high")
+    monkeypatch.delenv("AGENT_MD_PROVIDER", raising=False)
+    monkeypatch.delenv("AGENT_MD_MODEL", raising=False)
+    monkeypatch.delenv("AGENT_MD_VARIANT", raising=False)
+
+    clear_settings_cache()
+    try:
+        settings = get_settings()
+    finally:
+        clear_settings_cache()
+
+    assert settings.AGENT_MD_PROVIDER == "anthropic"
+    assert settings.AGENT_MD_MODEL == "claude-sonnet-4-5"
+    assert settings.AGENT_MD_VARIANT == "high"
+
+
+def test_settings_agent_md_overrides_llm(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """AGENT_MD_* override LLM_* when explicitly set."""
+    _set_required_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("REPO_URLS", "https://a.git")
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("LLM_MODEL", "claude-sonnet-4-5")
+    monkeypatch.setenv("LLM_VARIANT", "high")
+    monkeypatch.setenv("AGENT_MD_PROVIDER", "opencode")
+    monkeypatch.setenv("AGENT_MD_MODEL", "deepseek-v4-flash-free")
+    monkeypatch.setenv("AGENT_MD_VARIANT", "low")
+
+    clear_settings_cache()
+    try:
+        settings = get_settings()
+    finally:
+        clear_settings_cache()
+
+    # Answering flow still uses LLM_*.
+    assert settings.LLM_PROVIDER == "anthropic"
+    assert settings.LLM_MODEL == "claude-sonnet-4-5"
+    assert settings.LLM_VARIANT == "high"
+    # AGENT.md generator uses the overrides.
+    assert settings.AGENT_MD_PROVIDER == "opencode"
+    assert settings.AGENT_MD_MODEL == "deepseek-v4-flash-free"
+    assert settings.AGENT_MD_VARIANT == "low"
+
+
+def test_settings_agent_md_partial_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A single AGENT_MD_* field can be overridden; others fall back."""
+    _set_required_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("REPO_URLS", "https://a.git")
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("LLM_MODEL", "claude-sonnet-4-5")
+    monkeypatch.setenv("AGENT_MD_MODEL", "claude-haiku-4-5")
+    # AGENT_MD_PROVIDER and AGENT_MD_VARIANT left unset
+    monkeypatch.delenv("AGENT_MD_PROVIDER", raising=False)
+    monkeypatch.delenv("AGENT_MD_VARIANT", raising=False)
+
+    clear_settings_cache()
+    try:
+        settings = get_settings()
+    finally:
+        clear_settings_cache()
+
+    assert settings.AGENT_MD_PROVIDER == "anthropic"  # fell back
+    assert settings.AGENT_MD_MODEL == "claude-haiku-4-5"  # overridden
+    assert settings.AGENT_MD_VARIANT is None  # fell back (LLM_VARIANT unset)

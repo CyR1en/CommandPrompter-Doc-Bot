@@ -39,6 +39,14 @@ class Settings(BaseSettings):
     bot will write a custom OpenAI-compatible provider block into
     ``opencode.json`` instead of relying on the built-in catalog.
 
+    The background AGENT.md generator (which preprocesses repositories
+    to generate AGENT.md files) shares the main LLM configuration by
+    default, but can be overridden to use a different (e.g. cheaper or
+    faster) model for repository preprocessing using the following settings:
+    * ``AGENT_MD_PROVIDER``
+    * ``AGENT_MD_MODEL``
+    * ``AGENT_MD_VARIANT``
+
     Attributes:
         DISCORD_TOKEN: Authentication token for the Discord bot account.
         LLM_PROVIDER: Provider ID known to OpenCode / Models.dev.
@@ -59,6 +67,13 @@ class Settings(BaseSettings):
             e.g. ``"max"``, ``"high"``, ``"low"``. ``None`` lets the
             model use its default. List valid variants for a model with
             ``opencode models --verbose``.
+        AGENT_MD_PROVIDER: Optional provider override for the AGENT.md
+            generator. Defaults to ``None`` (falling back to ``LLM_PROVIDER``).
+        AGENT_MD_MODEL: Optional model override for the AGENT.md
+            generator. Defaults to ``None`` (falling back to ``LLM_MODEL``).
+        AGENT_MD_VARIANT: Optional reasoning-effort variant override for
+            the AGENT.md generator. Defaults to ``None`` (falling back to
+            ``LLM_VARIANT``).
         GITHUB_TOKEN: Optional GitHub token used to authenticate when
             cloning/pulling private repositories.
         REPO_URLS: Git repository URLs to clone and compile for the
@@ -98,6 +113,9 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str | None = None
     LLM_MODEL: str = "deepseek-v4-flash-free"
     LLM_VARIANT: str | None = None
+    AGENT_MD_PROVIDER: str | None = None
+    AGENT_MD_MODEL: str | None = None
+    AGENT_MD_VARIANT: str | None = None
     GITHUB_TOKEN: str | None = None
     # ``NoDecode`` tells pydantic-settings to pass the raw environment value
     # through to the ``_split_repo_urls`` validator instead of trying to
@@ -137,6 +155,22 @@ class Settings(BaseSettings):
                 "LLM_BASE_URL is required when LLM_PROVIDER == 'custom-llm' "
                 "(the custom OpenAI-compatible shim needs an endpoint URL)."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _resolve_agent_md_defaults(self) -> "Settings":
+        """Resolve ``AGENT_MD_*`` fields to ``LLM_*`` when unset.
+
+        Allows the AGENT.md generator to share the LLM_* configuration by
+        default while still being overridable for cases where a different
+        (e.g. cheaper or faster) provider/model is preferred.
+        """
+        if self.AGENT_MD_PROVIDER is None:
+            self.AGENT_MD_PROVIDER = self.LLM_PROVIDER
+        if self.AGENT_MD_MODEL is None:
+            self.AGENT_MD_MODEL = self.LLM_MODEL
+        if self.AGENT_MD_VARIANT is None:
+            self.AGENT_MD_VARIANT = self.LLM_VARIANT
         return self
 
     @field_validator("REPO_URLS", mode="before")
