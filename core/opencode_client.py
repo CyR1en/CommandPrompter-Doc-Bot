@@ -100,17 +100,27 @@ def _extract_text_events(body: str) -> str:
         line = line.strip()
         if not line:
             continue
+        if line.startswith("event: "):
+            continue
+        if line.startswith("data: "):
+            line = line[6:].strip()
+            
         try:
             event: dict[str, Any] = json.loads(line)
         except json.JSONDecodeError:
             _logger.debug("Skipping non-JSON opencode line: %s", line)
             continue
         if event.get("type") == "text":
-            part_obj: object = event.get("part", {})
-            if isinstance(part_obj, dict):
-                text: object = part_obj.get("text", "")
-                if isinstance(text, str):
-                    parts.append(text)
+            # New format: {"type": "text", "text": "..."}
+            if "text" in event and isinstance(event["text"], str):
+                parts.append(event["text"])
+            # Legacy format: {"type": "text", "part": {"text": "..."}}
+            else:
+                part_obj: object = event.get("part", {})
+                if isinstance(part_obj, dict):
+                    text: object = part_obj.get("text", "")
+                    if isinstance(text, str):
+                        parts.append(text)
     return "".join(parts)
 
 

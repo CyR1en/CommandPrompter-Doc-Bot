@@ -530,6 +530,21 @@ def test_extract_text_events_skips_malformed_lines() -> None:
     assert _extract_text_events(body) == "ok!"
 
 
+def test_extract_text_events_handles_sse_format() -> None:
+    """Handles Server-Sent Events (SSE) format returned by newer opencode versions."""
+    body = (
+        "event: message\n"
+        'data: {"type": "text", "text": "Hello "}\n'
+        "\n"
+        "event: message\n"
+        'data: {"type": "reasoning", "text": "thinking..."}\n'
+        "\n"
+        "event: message\n"
+        'data: {"type": "text", "text": "world!"}\n'
+    )
+    assert _extract_text_events(body) == "Hello world!"
+
+
 # ---------------------------------------------------------------------------
 # Async context manager protocol
 # ---------------------------------------------------------------------------
