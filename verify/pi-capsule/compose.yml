@@ -1,0 +1,202 @@
+x-capsule-security: &capsule-security
+  network_mode: none
+  read_only: true
+  cap_drop: [ALL]
+  cap_add: [SETUID, SETGID, KILL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 64
+  mem_limit: 256m
+  cpus: 1.0
+  shm_size: 64k
+  tmpfs:
+    - /dev/shm:ro,nosuid,nodev,noexec,size=65536,mode=0000
+
+x-control-environment: &control-environment
+  DATABASE_URL: postgresql://verify:verify-db-password@postgres:5432/verify
+  APP_MASTER_KEY: verify-key:dmVyaWZpY2F0aW9uLW1hc3Rlci1rZXktMzItYnl0ZSE
+  PLANNER_API_TOKEN: planner-api-key-sentinel
+  WRITER_API_TOKEN: writer-api-key-sentinel
+  PROTOCOL_API_TOKEN: protocol-api-key-sentinel
+
+services:
+  capsule:
+    <<: *capsule-security
+    image: ref0-pi-capsule:verify
+    build:
+      context: ../..
+      dockerfile: capsule/Dockerfile
+      target: production
+    volumes:
+      - capsule_socket:/run/capsule
+
+  capsule-production-b:
+    <<: *capsule-security
+    image: ref0-pi-capsule:verify
+    build:
+      context: ../..
+      dockerfile: capsule/Dockerfile
+      target: production
+    volumes:
+      - capsule_production_b_socket:/run/capsule
+
+  capsule-stalled:
+    <<: *capsule-security
+    image: ref0-pi-capsule-stalled:verify
+    build:
+      context: ../..
+      dockerfile: verify/pi-capsule/stalled.Dockerfile
+    volumes:
+      - capsule_stalled_socket:/run/capsule
+
+  capsule-a:
+    <<: *capsule-security
+    image: ref0-pi-capsule-hostile:verify
+    build:
+      context: ../..
+      dockerfile: capsule/Dockerfile
+      target: verification
+    volumes:
+      - capsule_a_socket:/run/capsule
+
+  capsule-b:
+    <<: *capsule-security
+    image: ref0-pi-capsule-hostile:verify
+    build:
+      context: ../..
+      dockerfile: capsule/Dockerfile
+      target: verification
+    volumes:
+      - capsule_b_socket:/run/capsule
+
+  isolation:
+    image: ref0-pi-isolation:verify
+    build:
+      context: ../..
+      dockerfile: verify/pi-capsule/verification.Dockerfile
+      target: isolation
+    user: "1000:2000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    mem_limit: 128m
+    cpus: 0.5
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,mode=0700,uid=1000,gid=2000
+    volumes:
+      - capsule_a_socket:/run/slot-a
+      - capsule_b_socket:/run/slot-b
+    depends_on:
+      capsule-a:
+        condition: service_healthy
+      capsule-b:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/capsule-isolation", "--healthcheck"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+
+  postgres:
+    image: postgres:18.6-alpine
+    environment:
+      POSTGRES_DB: verify
+      POSTGRES_USER: verify
+      POSTGRES_PASSWORD: verify-db-password
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 1.0
+    tmpfs:
+      - /var/lib/postgresql:rw,nosuid,nodev,noexec,size=256m,uid=70,gid=70
+      - /var/run/postgresql:rw,nosuid,nodev,noexec,size=1m,uid=70,gid=70
+      - /tmp:rw,nosuid,nodev,noexec,size=16m
+    networks: [database]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U verify -d verify"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+
+  provider:
+    image: ref0-pi-fake-provider:verify
+    build:
+      context: ../..
+      dockerfile: verify/pi-capsule/verification.Dockerfile
+      target: provider
+    environment:
+      PLANNER_API_TOKEN: planner-api-key-sentinel
+      WRITER_API_TOKEN: writer-api-key-sentinel
+      PROTOCOL_API_TOKEN: protocol-api-key-sentinel
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    mem_limit: 128m
+    cpus: 0.5
+    networks: [provider]
+    healthcheck:
+      test: ["CMD", "/capsule-provider", "--healthcheck"]
+      interval: 1s
+      timeout: 2s
+      retries: 20
+
+  control:
+    image: ref0-pi-control:verify
+    build:
+      context: ../..
+      dockerfile: verify/pi-capsule/verification.Dockerfile
+      target: control
+    user: "1000:2000"
+    environment: *control-environment
+    command: ["/bin/sh", "-c", "/usr/local/bin/ref0 migrate up && exec /usr/local/bin/capsule-control"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 512m
+    cpus: 2.0
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,mode=0700,uid=1000,gid=2000
+      - /data:rw,nosuid,nodev,noexec,size=128m,mode=0700,uid=1000,gid=2000
+    volumes:
+      - capsule_socket:/run/prod-0
+      - capsule_production_b_socket:/run/prod-1
+      - capsule_stalled_socket:/run/stalled
+    networks: [database, provider]
+    depends_on:
+      capsule:
+        condition: service_healthy
+      capsule-production-b:
+        condition: service_healthy
+      capsule-stalled:
+        condition: service_healthy
+      provider:
+        condition: service_healthy
+      isolation:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  capsule-malformed:
+    <<: *capsule-security
+    profiles: [negative]
+    image: ref0-pi-capsule:verify
+    tmpfs:
+      - /run/capsule:rw,nosuid,nodev,noexec,mode=0770,uid=1001,gid=1001
+
+volumes:
+  capsule_socket:
+  capsule_production_b_socket:
+  capsule_a_socket:
+  capsule_b_socket:
+  capsule_stalled_socket:
+
+networks:
+  database:
+    internal: true
+  provider:
+    internal: true

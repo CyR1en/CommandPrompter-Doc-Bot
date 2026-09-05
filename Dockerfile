@@ -1,63 +1,42 @@
-# CMDP Doc Bot — container image
-#
-# Python image that runs the Discord documentation bot. The bot starts
-# a single long-lived ``opencode serve`` subprocess at boot and talks
-# to its HTTP API for per-user session management, so the image needs
-# the ``opencode`` CLI (installed via its official one-line installer)
-# in addition to ``git`` (for GitPython-driven repository syncing) and
-# the Python dependencies.
+FROM node:24.20.0-bookworm-slim AS frontend-build
 
-FROM python:3.11-slim
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json frontend/.npmrc ./
+RUN npm ci --ignore-scripts
+COPY frontend/ ./
+RUN npm run build
 
-# Keep Python output unbuffered so logs stream in real time, skip writing
-# .pyc files, and tell pip not to cache downloads so the layer stays small.
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+FROM golang:1.27.0-bookworm AS go-build
 
-# System dependencies required at runtime.
-#   git              — GitPython shells out to the ``git`` binary.
-#   ca-certificates  — needed for HTTPS git operations.
-#   curl             — used by the OpenCode install script.
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/ ./cmd/
+COPY db/ ./db/
+COPY internal/ ./internal/
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -buildvcs=false -trimpath -ldflags="-s -w" \
+    -o /out/ref0 ./cmd/ref0
+
+FROM debian:bookworm-slim AS production
+
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        git \
-        ca-certificates \
-        curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install the OpenCode CLI globally using the official install script.
-# OpenCode is the agent orchestrator that the bot spawns as a subprocess
-# to answer each question. The script downloads a self-contained
-# ``opencode`` binary onto the user's PATH (commonly ``~/.opencode/bin``),
-# so that directory is prepended to ``PATH`` to make the binary
-# resolvable to subsequent ``RUN`` steps and the final entrypoint.
-ENV PATH="/root/.opencode/bin:${PATH}"
-RUN curl -fsSL https://opencode.ai/install | bash
-
-# Ensure the OpenCode per-user config directory and agents subdirectory
-# exist so ``setup_opencode`` can write ``opencode.json`` and the
-# ``docbot.md`` agent definition at runtime.
-RUN mkdir -p ~/.config/opencode/agents
+    && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends ca-certificates git wget \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 2000 ref0 \
+    && useradd --system --uid 1000 --gid ref0 --home-dir /app --shell /usr/sbin/nologin ref0 \
+    && mkdir -p /app/data /app/frontend/dist /app/capsule \
+    && chown -R ref0:ref0 /app
 
 WORKDIR /app
+COPY --from=go-build /out/ref0 /usr/local/bin/ref0
+COPY --from=frontend-build /frontend/dist/ ./frontend/dist/
+COPY capsule/wire.schema.json ./capsule/wire.schema.json
+COPY LICENSE THIRD_PARTY_NOTICES.md /usr/share/licenses/ref0/
 
-# Install Python dependencies first so this layer is cached across code
-# changes and only rebuilt when requirements.txt changes.
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy the application code.
-COPY bot/ ./bot/
-COPY core/ ./core/
-COPY agent/ ./agent/
-COPY main.py ./main.py
-
-# Persistent state (cloned repos) lives under /app/data and is mounted as
-# a volume at runtime so it survives container restarts.
-RUN mkdir -p /app/data
+USER ref0
 VOLUME ["/app/data"]
 
-# Run the bot.
-ENTRYPOINT ["python", "main.py"]
+ENTRYPOINT ["/usr/local/bin/ref0"]
+CMD ["api"]

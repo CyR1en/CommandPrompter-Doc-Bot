@@ -1,0 +1,214 @@
+name: verify
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go, PostgreSQL, and race checks
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18.6-bookworm
+        env:
+          POSTGRES_DB: ref0_test
+          POSTGRES_USER: ref0
+          POSTGRES_PASSWORD: ref0-test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ref0 -d ref0_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      DATABASE_URL: postgresql://ref0:ref0-test-password@127.0.0.1:5432/ref0_test?sslmode=disable
+      TEST_DATABASE_URL: postgresql://ref0:ref0-test-password@127.0.0.1:5432/ref0_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: 1.27.0
+          cache: true
+      - name: Download modules
+        run: go mod download
+      - name: Verify module checksums
+        run: go mod verify
+      - name: Generate SQL queries with pinned sqlc
+        run: go generate ./internal/database/sqlc
+      - name: Check generated SQL queries are committed
+        run: test -z "$(git status --porcelain=v1 --untracked-files=all -- internal/database/sqlc)"
+      - name: Check formatting
+        run: test -z "$(gofmt -l capsule cmd db internal verification)"
+      - name: Build all Go packages
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Create the test schema
+        run: go run ./cmd/ref0 migrate up
+      - name: Run race-enabled tests against PostgreSQL
+        run: go test -race -count=1 -p=1 ./...
+      - name: Prove coordinated database and artifact restore
+        env:
+          REF0_RUN_DOCKER_TESTS: "1"
+        run: go test -count=1 ./verification -run '^TestDatabaseAndArtifactBackupRestore$'
+
+  frontend:
+    name: Frontend contract and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: 1.27.0
+          cache: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24.20.0
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - working-directory: frontend
+        run: npm ci
+      - working-directory: frontend
+        run: npm run generate:api
+      - name: Check generated API binding is committed
+        run: test -z "$(git status --porcelain=v1 --untracked-files=all -- frontend/openapi.json frontend/src/api/schema.d.ts)"
+      - working-directory: frontend
+        run: npm run lint
+      - working-directory: frontend
+        run: npm run typecheck
+      - working-directory: frontend
+        run: npm test
+      - working-directory: frontend
+        run: npm run build
+
+  capsule:
+    name: Pi capsule protocol and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.19.0
+          cache: npm
+          cache-dependency-path: capsule/package-lock.json
+      - working-directory: capsule
+        run: npm ci
+      - working-directory: capsule
+        run: npm run format:check
+      - working-directory: capsule
+        run: npm run typecheck
+      - working-directory: capsule
+        run: npm run build
+      - working-directory: capsule
+        run: npm test
+
+  dependency-audit:
+    name: Go and npm dependency audits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: 1.27.0
+          cache: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24.20.0
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            capsule/package-lock.json
+      - name: Audit reachable Go vulnerabilities
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+          "$(go env GOPATH)/bin/govulncheck" ./...
+      - name: Audit frontend dependencies
+        run: |
+          npm --prefix frontend ci --ignore-scripts
+          npm --prefix frontend audit --omit=dev --audit-level=high
+          npm --prefix frontend audit --audit-level=high
+      - name: Audit capsule dependencies
+        run: |
+          npm --prefix capsule ci --ignore-scripts
+          npm --prefix capsule audit --omit=dev --audit-level=high
+          npm --prefix capsule audit --audit-level=high
+
+  capsule-isolation:
+    name: Pi capsule isolation and recovery
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Run isolated documentation and crash-recovery proof
+        run: sh verify/pi-capsule/isolation-run.sh
+
+  containers:
+    name: Compose and production images
+    runs-on: ubuntu-latest
+    env:
+      POSTGRES_PASSWORD: ref0-compose-check
+      APP_MASTER_KEY: verify-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+      METRICS_BEARER_TOKEN: metrics-test-token-not-a-secret-000000000000
+      REF0_IMAGE: ref0:verify
+      REF0_CAPSULE_IMAGE: ref0-pi-capsule:verify
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Validate Compose manifests
+        run: |
+          docker compose -f docker-compose.yml config --quiet
+          docker compose -f docker-compose.portainer.yml config --quiet
+      - name: Build production application image
+        run: docker build --tag ref0:verify .
+      - name: Build production capsule image
+        run: docker build --file capsule/Dockerfile --target production --tag ref0-pi-capsule:verify .
+      - name: Scan production application image
+        run: >-
+          docker run --rm
+          -v /var/run/docker.sock:/var/run/docker.sock
+          -v ref0-verify-trivy-cache:/root/.cache/trivy
+          aquasec/trivy@sha256:086971aaf400beebd94e8300fd8ea623774419597169156cec56eec5b00dfb1e
+          image --scanners vuln,secret --severity HIGH,CRITICAL
+          --ignore-unfixed --exit-code 1 ref0:verify
+      - name: Scan production capsule image
+        run: >-
+          docker run --rm
+          -v /var/run/docker.sock:/var/run/docker.sock
+          -v ref0-verify-trivy-cache:/root/.cache/trivy
+          aquasec/trivy@sha256:086971aaf400beebd94e8300fd8ea623774419597169156cec56eec5b00dfb1e
+          image --scanners vuln,secret --severity HIGH,CRITICAL
+          --ignore-unfixed --exit-code 1 ref0-pi-capsule:verify
+
+  browser-acceptance:
+    name: Isolated production browser acceptance
+    needs: [go, frontend, capsule, containers]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: 1.27.0
+          cache: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24.20.0
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - working-directory: frontend
+        run: npm ci
+      - name: Install Chromium
+        working-directory: frontend
+        run: npx --no-install playwright install --with-deps chromium
+      - name: Run isolated ref0 browser acceptance
+        run: bash verification/run-browser-acceptance.sh

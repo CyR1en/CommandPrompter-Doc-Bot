@@ -1,46 +1,14 @@
-# Environments
+# Local environment
 .env
 .venv/
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
+# Build artifacts
 build/
-develop-eggs/
 dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+/ref0
 
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-.nox/
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
+# Node
+node_modules/
 
 # Data and State
 data/
@@ -58,3 +26,7 @@ AGENTS.md
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# BEGIN oh-my-opencode-slim clonedeps
+.slim/clonedeps/repos/
+# END oh-my-opencode-slim clonedeps

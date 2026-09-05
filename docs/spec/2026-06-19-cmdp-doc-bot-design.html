@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CMDP Doc Bot - Design Specification</title>
+    <title>Historical CMDP Doc Bot Design Specification</title>
     <style>
         body { font-family: system-ui, -apple-system, sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 2rem; color: #333; }
         h1, h2, h3 { color: #111; }
@@ -20,6 +20,9 @@
 <body>
 
     <h1>CMDP Doc Bot - Design Specification</h1>
+    <div class="note">
+        <strong>Historical record.</strong> This 2026-06-19 design predates ref0 and does not describe the current Go runtime. See <a href="../architecture/openwiki-platform.md">the current platform architecture</a>. The old product name, Python stack, and dependency choices below remain only to preserve the original proposal.
+    </div>
     <p><strong>Date:</strong> 2026-06-19</p>
     <p><strong>Overview:</strong> A Discord bot that uses a sandbox LLM agent (via OpenCode Zen) to answer user questions about a Minecraft plugin. The bot uses Retrieval-Augmented Generation (RAG) with local clones of the documentation and source code repositories.</p>
 

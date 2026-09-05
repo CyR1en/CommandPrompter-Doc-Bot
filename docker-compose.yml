@@ -1,16 +1,198 @@
-# CMDP Doc Bot — container orchestration
-#
-# Builds and runs the bot from the local Dockerfile, mounts ./data so the
-# cloned repositories and the compiled full-context documentation persist
-# across restarts, and feeds configuration in from a .env file.
+x-database-environment: &database-environment
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: 5432
+  POSTGRES_DB: ${POSTGRES_DB:-ref0}
+  POSTGRES_USER: ${POSTGRES_USER:-ref0}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+
+x-runtime-environment: &runtime-environment
+  <<: *database-environment
+  APP_MASTER_KEY: ${APP_MASTER_KEY:?set APP_MASTER_KEY}
+  APP_PREVIOUS_MASTER_KEYS: ${APP_PREVIOUS_MASTER_KEYS:-}
+  APP_DATA_DIR: /app/data
+  APP_VERSION: ${APP_VERSION:-0.1.0}
+
+x-runtime: &runtime
+  image: ${REF0_IMAGE:-ref0:local}
+  build:
+    context: .
+    dockerfile: Dockerfile
+  init: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 256
+  mem_limit: 768m
+  cpus: 2.0
+  stop_grace_period: 15s
+
+x-capsule-slot: &capsule-slot
+  image: ${REF0_CAPSULE_IMAGE:-ref0-pi-capsule:pi-0.84.4-r9}
+  network_mode: none
+  read_only: true
+  cap_drop: [ALL]
+  cap_add: [SETUID, SETGID, KILL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 64
+  mem_limit: 256m
+  cpus: 1.0
+  shm_size: 64k
+  tmpfs:
+    - /dev/shm:ro,nosuid,nodev,noexec,size=65536,mode=0000
+  restart: unless-stopped
+  stop_grace_period: 10s
+  healthcheck:
+    test: [CMD, /usr/local/bin/capsule-supervisor, --check]
+    interval: 2s
+    timeout: 1s
+    retries: 15
 
 services:
-  bot:
+  postgres:
+    image: postgres:18.6-bookworm
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ref0}
+      POSTGRES_USER: ${POSTGRES_USER:-ref0}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    security_opt: [no-new-privileges:true]
+    pids_limit: 512
+    mem_limit: 1g
+    cpus: 2.0
+    shm_size: 256m
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  migrate:
+    <<: *runtime
+    command: ["migrate", "up"]
+    environment:
+      <<: *database-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 1.0
+    restart: "no"
+
+  capsule-slot-0:
+    <<: *capsule-slot
     build:
       context: .
-      dockerfile: Dockerfile
-    env_file:
-      - .env
+      dockerfile: capsule/Dockerfile
+      target: production
     volumes:
-      - ./data:/app/data
+      - capsule_slot_0_socket:/run/capsule
+
+  capsule-slot-1:
+    <<: *capsule-slot
+    build:
+      context: .
+      dockerfile: capsule/Dockerfile
+      target: production
+    volumes:
+      - capsule_slot_1_socket:/run/capsule
+
+  api:
+    <<: *runtime
+    command: ["api"]
+    environment:
+      <<: *runtime-environment
+      APP_BOOTSTRAP_TOKEN: ${APP_BOOTSTRAP_TOKEN:-}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:8000}
+      METRICS_BEARER_TOKEN: ${METRICS_BEARER_TOKEN:?set METRICS_BEARER_TOKEN}
+      OPERATOR_SESSION_TTL_MINUTES: ${OPERATOR_SESSION_TTL_MINUTES:-10080}
+      BOOTSTRAP_TOKEN_TTL_MINUTES: ${BOOTSTRAP_TOKEN_TTL_MINUTES:-30}
+      KNOWLEDGE_BASE_DELETE_GRACE_HOURS: ${KNOWLEDGE_BASE_DELETE_GRACE_HOURS:-72}
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    volumes:
+      - app_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--output-document=-", "--timeout=3", "http://127.0.0.1:8000/health/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.5
     restart: unless-stopped
+
+  worker:
+    <<: *runtime
+    user: "1000:2000"
+    command: ["worker"]
+    environment:
+      <<: *runtime-environment
+      SOURCE_ALLOW_PRIVATE_NETWORK: ${SOURCE_ALLOW_PRIVATE_NETWORK:-false}
+      SOURCE_GIT_CA_FILE: ${SOURCE_GIT_CA_FILE:-}
+      SOURCE_POLL_SCAN_SECONDS: ${SOURCE_POLL_SCAN_SECONDS:-30}
+      SOURCE_POLL_BATCH_SIZE: ${SOURCE_POLL_BATCH_SIZE:-50}
+      KNOWLEDGE_BASE_DELETE_GRACE_HOURS: ${KNOWLEDGE_BASE_DELETE_GRACE_HOURS:-72}
+      WORKER_ID: ${WORKER_ID:-worker-1}
+      JOB_LEASE_SECONDS: ${JOB_LEASE_SECONDS:-60}
+      JOB_POLL_INTERVAL_SECONDS: ${JOB_POLL_INTERVAL_SECONDS:-1}
+      JOB_RETRY_BACKOFF_SECONDS: ${JOB_RETRY_BACKOFF_SECONDS:-5}
+      RETENTION_SCAN_SECONDS: ${RETENTION_SCAN_SECONDS:-3600}
+      RETENTION_BATCH_SIZE: ${RETENTION_BATCH_SIZE:-100}
+      SOURCE_SNAPSHOT_RETENTION_DAYS: ${SOURCE_SNAPSHOT_RETENTION_DAYS:-30}
+      FAILED_DRAFT_RETENTION_DAYS: ${FAILED_DRAFT_RETENTION_DAYS:-14}
+      JOB_LOG_RETENTION_DAYS: ${JOB_LOG_RETENTION_DAYS:-30}
+      EVENT_LOG_RETENTION_DAYS: ${EVENT_LOG_RETENTION_DAYS:-30}
+      AGENT_RUN_RETENTION_DAYS: ${AGENT_RUN_RETENTION_DAYS:-90}
+      DISCORD_CONTEXT_RETENTION_DAYS: ${DISCORD_CONTEXT_RETENTION_DAYS:-7}
+      OLD_WIKI_RETENTION_DAYS: ${OLD_WIKI_RETENTION_DAYS:-90}
+      DOCUMENTATION_AGENT_RUNTIME: ${DOCUMENTATION_AGENT_RUNTIME:-pi-capsule}
+      PI_CAPSULE_SOCKET_PATHS: '${PI_CAPSULE_SOCKET_PATHS:-["/run/capsule-slot-0/capsule.sock","/run/capsule-slot-1/capsule.sock"]}'
+    volumes:
+      - app_data:/app/data
+      - capsule_slot_0_socket:/run/capsule-slot-0:ro
+      - capsule_slot_1_socket:/run/capsule-slot-1:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      capsule-slot-0:
+        condition: service_healthy
+      capsule-slot-1:
+        condition: service_healthy
+    restart: unless-stopped
+
+  discord:
+    <<: *runtime
+    command: ["discord"]
+    environment:
+      <<: *runtime-environment
+      DISCORD_SUPERVISOR_SCAN_SECONDS: ${DISCORD_SUPERVISOR_SCAN_SECONDS:-2}
+      DISCORD_CONTEXT_IDLE_MINUTES: ${DISCORD_CONTEXT_IDLE_MINUTES:-30}
+    volumes:
+      - app_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    pids_limit: 128
+    mem_limit: 384m
+    cpus: 1.0
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  app_data:
+  capsule_slot_0_socket:
+  capsule_slot_1_socket:

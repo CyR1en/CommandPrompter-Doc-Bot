@@ -1,18 +1,28 @@
 # Build artifacts and caches
-__pycache__/
-*.py[cod]
-.pytest_cache/
-*.egg-info/
 build/
 dist/
+/ref0
+frontend/node_modules/
+node_modules/
+capsule/node_modules/
+frontend/coverage/
+frontend/test-results/
+frontend/playwright-report/
+frontend/*.tsbuildinfo
 
-# Local virtual environment — never needed inside the image.
+# Local environment — never needed inside the image.
 .venv/
-venv/
-env/
 
 # Local runtime data is mounted as a volume, not baked into the image.
 data/
+.audit/
+.slim/
+.openapi-data/
+.github/
+.opencode/
+.ignore
+AGENTS.md
+CONTEXT.md
 
 # Editor / OS clutter.
 .git/
@@ -26,4 +36,8 @@ data/
 # Docs and tests are not needed at runtime.
 docs/
 tests/
+frontend/e2e/
+**/*_test.go
+frontend/**/*.test.ts
+frontend/**/*.test.tsx
 README.md
