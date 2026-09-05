@@ -37,11 +37,11 @@ notices at `/usr/local/LICENSE`; Debian package notices remain under
 | github.com/prometheus/procfs | v0.21.1 | Apache-2.0 | Prometheus notice reproduced below |
 | github.com/sethvargo/go-retry | v0.4.0 | Apache-2.0 | Upstream Apache-2.0 terms |
 | go.uber.org/multierr | v1.11.0 | MIT | Copyright 2017-2021 Uber Technologies, Inc. |
-| golang.org/x/crypto | v0.54.0 | BSD-3-Clause | Copyright 2009 The Go Authors |
+| golang.org/x/crypto | v0.55.0 | BSD-3-Clause | Copyright 2009 The Go Authors |
 | golang.org/x/net | v0.57.0 | BSD-3-Clause | Copyright 2009 The Go Authors |
 | golang.org/x/sync | v0.22.0 | BSD-3-Clause | Copyright 2009 The Go Authors |
 | golang.org/x/sys | v0.47.0 | BSD-3-Clause | Copyright 2009 The Go Authors |
-| golang.org/x/text | v0.40.0 | BSD-3-Clause | Copyright 2009 The Go Authors |
+| golang.org/x/text | v0.41.0 | BSD-3-Clause | Copyright 2009 The Go Authors |
 | google.golang.org/protobuf | v1.36.11 | BSD-3-Clause | Copyright 2018 The Go Authors |
 
 ## Bundled browser application

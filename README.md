@@ -17,7 +17,7 @@ No model, repository, or Discord secret is required in an environment variable.
 Operators enter those write-only credentials in the dashboard. The application
 encrypts them with `APP_MASTER_KEY`.
 
-## Start locally
+## Deploy published images
 
 Requirements: Docker Engine with Compose v2.
 
@@ -27,11 +27,26 @@ Requirements: Docker Engine with Compose v2.
 3. Start the stack:
 
    ```sh
-   docker compose up --build
+   docker compose pull
+   docker compose up -d
    ```
 
 4. Open `http://localhost:8000/bootstrap` and create the first operator.
 5. Remove `APP_BOOTSTRAP_TOKEN` from `.env`, then restart the API service.
+
+The Compose file pulls `ghcr.io/cyr1en/ref0:edge` for the application and
+`ghcr.io/cyr1en/ref0:pi-0.84.4-r9-edge` for its two isolated capsules. No source
+checkout or local build is required; `.env` and `docker-compose.yml` suffice.
+`edge` tracks verified builds from `main`. For a fixed release, set `REF0_IMAGE`
+and `REF0_CAPSULE_IMAGE` to matching release tags or immutable digests.
+
+The existing `docker-publish` GitHub Actions workflow verifies the project,
+then builds and publishes both images for `linux/amd64` and `linux/arm64`.
+It runs on pushes to `main`, `v*` tags, or manual dispatch. A tag such as
+`v1.2.3` publishes `ref0:1.2.3` and `ref0:pi-0.84.4-r9-1.2.3`.
+Wait for the first successful publishing run before pulling these images.
+If the GHCR package is private, authenticate with `docker login ghcr.io` using
+a token with package read access, or make the package public for anonymous pulls.
 
 The bootstrap token is single-use in PostgreSQL. The browser session is
 HTTP-only. State-changing API requests require the CSRF token returned by the
@@ -78,6 +93,13 @@ Before changing a production deployment, read
 the stack.
 
 ## Development
+
+To build from this checkout instead of pulling published images:
+
+```sh
+REF0_IMAGE=ref0:local REF0_CAPSULE_IMAGE=ref0-pi-capsule:local \
+  docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
+```
 
 The tested toolchains are Go 1.27.0, Node 24 for the frontend, Node 22.19.0 for
 the pinned Pi capsule, and PostgreSQL 18.

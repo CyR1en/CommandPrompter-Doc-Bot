@@ -1,0 +1,29 @@
+# Explicit local-build override; deployment uses docker-compose.yml alone.
+x-runtime-build: &runtime-build
+  image: ${REF0_IMAGE:-ref0:local}
+  pull_policy: never
+  build:
+    context: .
+    dockerfile: Dockerfile
+
+x-capsule-build: &capsule-build
+  image: ${REF0_CAPSULE_IMAGE:-ref0-pi-capsule:local}
+  pull_policy: never
+  build:
+    context: .
+    dockerfile: capsule/Dockerfile
+    target: production
+
+services:
+  migrate:
+    <<: *runtime-build
+  api:
+    <<: *runtime-build
+  worker:
+    <<: *runtime-build
+  discord:
+    <<: *runtime-build
+  capsule-slot-0:
+    <<: *capsule-build
+  capsule-slot-1:
+    <<: *capsule-build

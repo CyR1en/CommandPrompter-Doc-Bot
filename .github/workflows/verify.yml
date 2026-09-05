@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: verify-${{ github.ref }}
+  group: verify-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -167,6 +167,7 @@ jobs:
       - name: Validate Compose manifests
         run: |
           docker compose -f docker-compose.yml config --quiet
+          docker compose -f docker-compose.yml -f docker-compose.build.yml config --quiet
           docker compose -f docker-compose.portainer.yml config --quiet
       - name: Build production application image
         run: docker build --tag ref0:verify .

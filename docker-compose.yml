@@ -13,10 +13,8 @@ x-runtime-environment: &runtime-environment
   APP_VERSION: ${APP_VERSION:-0.1.0}
 
 x-runtime: &runtime
-  image: ${REF0_IMAGE:-ref0:local}
-  build:
-    context: .
-    dockerfile: Dockerfile
+  image: ${REF0_IMAGE:-ghcr.io/cyr1en/ref0:edge}
+  pull_policy: always
   init: true
   cap_drop: [ALL]
   security_opt: [no-new-privileges:true]
@@ -26,7 +24,8 @@ x-runtime: &runtime
   stop_grace_period: 15s
 
 x-capsule-slot: &capsule-slot
-  image: ${REF0_CAPSULE_IMAGE:-ref0-pi-capsule:pi-0.84.4-r9}
+  image: ${REF0_CAPSULE_IMAGE:-ghcr.io/cyr1en/ref0:pi-0.84.4-r9-edge}
+  pull_policy: always
   network_mode: none
   read_only: true
   cap_drop: [ALL]
@@ -85,19 +84,11 @@ services:
 
   capsule-slot-0:
     <<: *capsule-slot
-    build:
-      context: .
-      dockerfile: capsule/Dockerfile
-      target: production
     volumes:
       - capsule_slot_0_socket:/run/capsule
 
   capsule-slot-1:
     <<: *capsule-slot
-    build:
-      context: .
-      dockerfile: capsule/Dockerfile
-      target: production
     volumes:
       - capsule_slot_1_socket:/run/capsule
 

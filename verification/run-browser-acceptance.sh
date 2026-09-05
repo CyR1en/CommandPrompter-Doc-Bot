@@ -36,6 +36,7 @@ fi
 accept_compose=(
   docker compose
   --file "${accept_root}/docker-compose.yml"
+  --file "${accept_root}/docker-compose.build.yml"
   --project-name "${accept_project}"
 )
 
