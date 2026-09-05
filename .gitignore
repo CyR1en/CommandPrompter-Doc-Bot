@@ -1,22 +1,41 @@
 # Local environment
 .env
+.env.*
+!.env.example
 .venv/
 
 # Build artifacts
 build/
 dist/
 /ref0
+*.tsbuildinfo
+
+# Test output
+coverage/
+test-results/
+playwright-report/
 
 # Node
 node_modules/
 
 # Data and State
 data/
+/.openapi-data/
 *.log
 
 # OpenCode / Agent stuff
 .opencode/
 AGENTS.md
+/.audit/
+/.slim/
+/.ignore
+/CONTEXT.md
+
+# Local research, design history, and verification records
+/docs/research/
+/docs/spec/
+/docs/architecture/openwiki-platform-synthesis.md
+/docs/operations/release-verification-*.md
 
 # OS generated files
 .DS_Store

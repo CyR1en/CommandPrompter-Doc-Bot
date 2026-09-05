@@ -129,6 +129,7 @@ else
 fi
 
 "${accept_compose[@]}" config --quiet
+"${accept_compose[@]}" pull postgres
 "${accept_compose[@]}" build migrate capsule-slot-0
 "${accept_compose[@]}" up \
   --detach \

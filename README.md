@@ -144,11 +144,7 @@ REF0_RUN_DOCKER_TESTS=1 go test ./verification -run TestDatabaseAndArtifactBacku
 ```
 
 See [the current platform architecture](docs/architecture/openwiki-platform.md)
-and [Pi capsule isolation](docs/architecture/pi-capsule.md). The dated files in
-`docs/spec/` record earlier designs and do not describe the current runtime.
-`CONTEXT.md` defines the project vocabulary and invariants.
-The local proof for the Agent hard cutover is recorded in
-[Agents hard-cutover verification](docs/operations/release-verification-2026-08-31-agents.md).
+and [Pi capsule isolation](docs/architecture/pi-capsule.md).
 
 The project license is in [LICENSE](LICENSE). Both production images also ship
 [third-party license notices](THIRD_PARTY_NOTICES.md) at

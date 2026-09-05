@@ -6,13 +6,6 @@ not a release sign-off. Advisory databases change after a commit is built, so
 attach the raw output, tool versions, commit, UTC time, and image digests to each
 release record.
 
-See the [2026-08-31 Agents hard-cutover verification record](release-verification-2026-08-31-agents.md)
-for the current schema, API, retention, restore, and test evidence. Unit 6 did
-not change the dependency manifests. The prior
-[2026-08-30 local release verification](release-verification-2026-08-30.md)
-retains the last image, license, and vulnerability results; rerun those
-time-sensitive checks before production release.
-
 ## Observed source audit
 
 These commands ran at `2026-08-30T10:21:26Z` against the working tree. npm was

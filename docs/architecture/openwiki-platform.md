@@ -1,8 +1,6 @@
 # ref0 platform architecture
 
-This page describes the current ref0 runtime. The dated documents under
-`docs/spec/` preserve earlier design decisions and do not define the running
-system.
+This page describes the current ref0 runtime.
 
 ## One binary owns four process roles
 
